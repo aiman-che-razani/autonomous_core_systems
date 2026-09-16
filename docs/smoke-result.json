@@ -1,0 +1,15 @@
+{
+  "version": "0.1.0",
+  "jobs": 30,
+  "succeeded": 30,
+  "coordinator_processes": 1,
+  "worker_processes": 3,
+  "elapsed_seconds": 3.672,
+  "jobs_per_worker": {
+    "demo-3f77ffbf-0": 10,
+    "demo-3f77ffbf-2": 11,
+    "demo-3f77ffbf-1": 9
+  },
+  "database": "PostgreSQL",
+  "note": "Local smoke test, not a throughput benchmark"
+}

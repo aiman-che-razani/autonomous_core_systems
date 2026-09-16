@@ -1,0 +1,8 @@
+*
+!pyproject.toml
+!uv.lock
+!greyqueue/
+!greyqueue/**
+!migrations/
+!migrations/**
+!alembic.ini
