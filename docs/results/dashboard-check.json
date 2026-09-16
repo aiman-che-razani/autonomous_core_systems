@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "javascript_errors": [],
+  "checks": [
+    "connect",
+    "submit",
+    "live completion",
+    "inspect attempts",
+    "no persisted token",
+    "mobile overflow",
+    "disconnect"
+  ]
+}

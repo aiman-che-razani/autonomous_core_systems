@@ -1,0 +1,11 @@
+{
+  "per_row": {
+    "sql_statements": 101,
+    "seconds": 0.03636220000043977
+  },
+  "batch": {
+    "sql_statements": 2,
+    "seconds": 0.004797599999619706
+  },
+  "note": "Same 100 results; local single-run query-count comparison, not an end-to-end throughput claim"
+}

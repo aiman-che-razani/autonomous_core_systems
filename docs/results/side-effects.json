@@ -1,0 +1,14 @@
+[
+  {
+    "idempotent_sink": false,
+    "executions": 2,
+    "side_effects": 2,
+    "passed": true
+  },
+  {
+    "idempotent_sink": true,
+    "executions": 2,
+    "side_effects": 1,
+    "passed": true
+  }
+]

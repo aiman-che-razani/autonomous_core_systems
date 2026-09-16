@@ -1,0 +1,52 @@
+[
+  {
+    "demo": "distributed_execution",
+    "jobs": 100,
+    "distribution": {
+      "demo-worker-1": 33,
+      "demo-worker-0": 33,
+      "demo-worker-2": 34
+    },
+    "seconds": 6.266,
+    "passed": true
+  },
+  {
+    "demo": "worker_killed_during_execution",
+    "attempts": [
+      "LEASE_EXPIRED",
+      "SUCCEEDED"
+    ],
+    "passed": true
+  },
+  {
+    "demo": "coordinator_killed_and_restarted",
+    "attempts": [
+      "LEASE_EXPIRED",
+      "SUCCEEDED"
+    ],
+    "passed": true
+  },
+  {
+    "demo": "two_active_coordinators",
+    "jobs": 30,
+    "duplicate_successes": 0,
+    "passed": true
+  },
+  {
+    "demo": "retry_and_timeout",
+    "retry_attempts": 3,
+    "timeout_terminal": "DEAD_LETTER",
+    "passed": true
+  },
+  {
+    "demo": "postgresql_outage",
+    "passed": true
+  },
+  {
+    "demo": "backpressure",
+    "admitted": 8,
+    "overflow_status": 429,
+    "capacity": 2,
+    "passed": true
+  }
+]

@@ -7,5 +7,6 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev && useradd --create-home greyqueue
 USER greyqueue
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["uvicorn", "greyqueue.api:create_app", "--factory", "--host", "0.0.0.0", "--port", "8810"]

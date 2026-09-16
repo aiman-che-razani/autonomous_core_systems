@@ -1,45 +1,17 @@
 """Each test gets a private PostgreSQL schema; never truncate the application tables."""
 
-import os
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select
 
 from greyqueue import service
 from greyqueue.api import create_app
 from greyqueue.config import Settings
-from greyqueue.models import Base, Event, Result, Worker
+from greyqueue.models import Event, Result, Worker
 
 pytestmark = pytest.mark.integration
-
-
-@pytest.fixture
-def database():
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        pytest.skip("Set TEST_DATABASE_URL to an isolated PostgreSQL database")
-    schema = "test_" + uuid.uuid4().hex
-    admin = create_engine(url)
-    with admin.begin() as connection:
-        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    scoped = make_url(url).update_query_dict({"options": f"-csearch_path={schema}"})
-    engine = create_engine(scoped)
-    Base.metadata.create_all(engine)
-    try:
-        yield (
-            sessionmaker(engine, expire_on_commit=False),
-            scoped.render_as_string(hide_password=False),
-        )
-    finally:
-        engine.dispose()
-        with admin.begin() as connection:
-            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
-        admin.dispose()
 
 
 def seed(sessions, count=1):

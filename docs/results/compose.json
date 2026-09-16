@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "jobs": 100,
+  "healthy_workers": 3,
+  "jobs_per_worker": {
+    "worker-a4128b18a192": 34,
+    "worker-f56ef199161b": 33,
+    "worker-1611ab0f6fb9": 33
+  },
+  "checks": [
+    "Docker image build",
+    "Alembic migration",
+    "three containers",
+    "job execution",
+    "dashboard",
+    "metrics"
+  ]
+}

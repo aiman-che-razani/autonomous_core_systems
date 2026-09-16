@@ -25,7 +25,15 @@ class HashArgs(Arguments):
     text: str = Field(max_length=10000)
 
 
-REGISTRY = {"sleep": SleepArgs, "calculate_pi": PiArgs, "hash_text": HashArgs}
+class FlakyArgs(Arguments):
+    failures: int = Field(ge=0, le=10)
+
+
+class RetryableTaskError(Exception):
+    pass
+
+
+REGISTRY = {"flaky": FlakyArgs, "sleep": SleepArgs, "calculate_pi": PiArgs, "hash_text": HashArgs}
 
 
 def validate(task: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -34,9 +42,13 @@ def validate(task: str, args: dict[str, Any]) -> dict[str, Any]:
     return REGISTRY[task].model_validate(args).model_dump()
 
 
-def execute(task: str, args: dict[str, Any]) -> dict[str, Any]:
+def execute(task: str, args: dict[str, Any], attempt: int = 1) -> dict[str, Any]:
     args = validate(task, args)
     match task:
+        case "flaky":
+            if attempt <= args["failures"]:
+                raise RetryableTaskError("Demonstration transient failure")
+            return {"attempt": attempt, "recovered": True}
         case "sleep":
             time.sleep(args["seconds"])
             return {"slept_seconds": args["seconds"]}
@@ -53,4 +65,12 @@ def execute(task: str, args: dict[str, Any]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     request = json.load(sys.stdin)
-    json.dump(execute(request["task"], request["args"]), sys.stdout, allow_nan=False)
+    try:
+        result = {
+            "output": execute(request["task"], request["args"], request.get("attempt_count", 1))
+        }
+    except RetryableTaskError as exc:
+        result = {"error": str(exc), "retryable": True}
+    except ValueError as exc:
+        result = {"error": str(exc), "retryable": False}
+    json.dump(result, sys.stdout, allow_nan=False)

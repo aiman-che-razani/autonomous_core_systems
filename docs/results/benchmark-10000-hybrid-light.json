@@ -1,0 +1,44 @@
+{
+  "environment": {
+    "timestamp": "2026-09-16T11:38:04.599953+00:00",
+    "python": "3.12.14",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "cpu": "AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD",
+    "logical_cpus": 16,
+    "physical_cpus": 8,
+    "ram_gb": 31.31,
+    "database": "PostgreSQL 18 on loopback",
+    "transport": "HTTP loopback",
+    "submission_concurrency": 12,
+    "resource_scope": "Coordinator and worker process trees; excludes PostgreSQL, load generator and Docker",
+    "cpu_unit": "Sum of per-process CPU percentages; 100% is one logical core",
+    "notes": "Single local runs including cold task pools; exclude cluster startup; no cross-host or production claim"
+  },
+  "results": [
+    {
+      "jobs": 10000,
+      "elapsed_seconds": 222.25000000000045,
+      "jobs_per_second": 44.99437570303703,
+      "latency_seconds": {
+        "average": 25.6851833366,
+        "p50": 30.6786805,
+        "p95": 38.16519525,
+        "p99": 38.60342787
+      },
+      "average_queue_wait_seconds": 25.5819968516,
+      "average_execution_seconds": 0.0430420722,
+      "peak_queue_depth": 2041,
+      "average_cpu_percent": 157.64804539722573,
+      "peak_rss_mb": 520.75390625,
+      "average_worker_utilization": 0.6370323665405633,
+      "failures": 0,
+      "retries": 0,
+      "samples": 793,
+      "submission_retries": 0,
+      "strategy": "hybrid",
+      "workload": "light",
+      "workers": 3,
+      "concurrency": 2
+    }
+  ]
+}

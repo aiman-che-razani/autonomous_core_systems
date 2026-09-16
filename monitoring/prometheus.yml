@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: greyqueue
+    metrics_path: /metrics
+    static_configs:
+      - targets: [coordinator:8810]
+    authorization:
+      type: Bearer
+      credentials_file: /run/secrets/greyqueue_client_token
