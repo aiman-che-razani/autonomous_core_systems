@@ -18,11 +18,11 @@ A portfolio implementation of a durable queue, scheduler, worker runtime and rec
 | v0.6 | Reproducible CPU/I/O/mixed benchmarks, resource measurements, charts, batched result reads |
 | v1.0 | Worker session isolation, bounded admission, container restrictions, scheduled jobs, dependencies, multiple coordinators |
 
-See [validation](docs/validation.md), [architecture](docs/architecture.md), [failure model](docs/failure-model.md) and [benchmarks](docs/benchmarks.md). This is a tested engineering portfolio release; operating an internet-facing or highly available production service also requires environment-specific TLS, database backups/replication and monitoring.
+See [validation](docs/validation.md), [architecture](docs/architecture.md), [failure model](docs/failure-model.md) and [benchmarks](docs/benchmarks.md). This is a tested engineering portfolio release. Operating it as an internet-facing or highly available production service is out of scope; that would need at least environment-specific TLS, database backups/replication, a least-privilege database role and monitoring.
 
 ## Docker quick start
 
-Requires Docker Compose. Initialize independent random development credentials, then start PostgreSQL, the migration, one coordinator and three workers:
+Requires Docker Compose. Initialize independent random development credentials (on an existing `.env` this only appends missing keys such as `APP_DB_PASSWORD`), then start PostgreSQL, the migration, the least-privilege role setup, one coordinator and three workers:
 
 ```sh
 python scripts/configure.py
@@ -44,14 +44,14 @@ uv run alembic upgrade head
 uv run uvicorn greyqueue.api:create_app --factory --host 127.0.0.1 --port 8810
 ```
 
-Run `uv run greyqueue-worker` in three additional terminals. Each process generates its own worker ID and has two slots by default. Configure `CAPACITY`, `EXECUTOR` and other settings in `.env` (see [.env.example](.env.example)). The local database helper creates only `.runtime/postgres` on port 55441 and generates credentials on first use; **do not run configure.py before initializing this native cluster**. It refuses to overwrite an existing `.env`. Set POSTGRES_BIN if binaries are elsewhere.
+Run `uv run greyqueue-worker` in three additional terminals. Each process generates its own worker ID and has two slots by default. (A fixed `WORKER_ID` can only re-register once its previous process has been marked DEAD.) Configure `CAPACITY`, `EXECUTOR` and other settings in `.env` (see [.env.example](.env.example)). The local database helper creates only `.runtime/postgres` on port 55441 and generates credentials on first use; **do not run configure.py before initializing this native cluster**. It refuses to overwrite an existing `.env`. Set POSTGRES_BIN if binaries are elsewhere.
 
 ```powershell
 uv run greyqueue submit calculate_pi --args '{"iterations":100000}' --priority 5 --idempotency-key research-001
 uv run greyqueue submit flaky --args '{"failures":2}' --max-retries 3
 uv run greyqueue get <job-id>
 uv run greyqueue attempts <job-id>
-uv run greyqueue jobs --state DEAD_LETTER
+uv run greyqueue jobs --state DEAD_LETTER --limit 100 --offset 0
 uv run greyqueue drain <worker-id>
 ```
 
@@ -64,6 +64,7 @@ $env:TEST_DATABASE_URL = uv run python -c "from greyqueue.config import settings
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
+uv run alembic upgrade head
 uv run alembic check
 uv run python -m scripts.experiments
 uv run python -m scripts.side_effects
@@ -86,4 +87,5 @@ Stop the isolated native database with `uv run python scripts/local_db.py stop` 
 - External side effects may repeat. Submission deduplication and sink-side idempotency solve different problems; see the [crash-before-ack demo](docs/idempotency.md).
 - `subprocess` is the default for killable task timeouts. Threads/process pools cannot forcibly stop one Python 3.12 callable; they retain its slot until it drains and discard late output. Tasks remain allowlisted and bounded.
 - Multiple coordinators can share PostgreSQL; a load balancer or client routing is still required for endpoint failover. PostgreSQL is the single authority and availability dependency.
-- Metrics summarize persistent history; the dashboard shows bounded recent rows. Benchmarks are local measurements, not production capacity claims.
+- Counters summarize persistent history; latency percentiles cover the last hour; the dashboard shows bounded recent rows. Benchmarks are local measurements, not production capacity claims.
+- CLI submissions without `--idempotency-key` get a random key, so re-running one after a timeout creates a second job. Pass a stable key when retrying.

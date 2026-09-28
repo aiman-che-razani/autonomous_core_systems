@@ -38,7 +38,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Success rate",
+      "title": "Completed jobs per second",
       "gridPos": {
         "h": 8,
         "w": 12,

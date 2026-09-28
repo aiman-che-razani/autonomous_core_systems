@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -25,6 +26,11 @@ class Base(DeclarativeBase):
 
 class Worker(Base):
     __tablename__ = "workers"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('HEALTHY','SUSPECT','DEAD','DRAINING')", name="workers_state_check"
+        ),
+    )
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     state: Mapped[str] = mapped_column(String(24), server_default="HEALTHY")
     capacity: Mapped[int] = mapped_column(Integer, server_default="1")
@@ -44,15 +50,24 @@ class Job(Base):
         CheckConstraint(
             "status IN ('QUEUED','LEASED','RUNNING','SUCCEEDED','FAILED','CANCELLED','RETRY_WAIT','DEAD_LETTER')"
         ),
+        # Queue heads in each scheduler's exact ORDER BY (see scheduler.py).
         Index(
-            "ix_jobs_queue",
-            "priority",
-            "available_at",
+            "ix_jobs_queue_fifo",
             "created_at",
+            "id",
+            postgresql_where=text("status IN ('QUEUED','RETRY_WAIT')"),
+        ),
+        Index(
+            "ix_jobs_queue_priority",
+            text("priority DESC"),
+            "created_at",
+            "id",
             postgresql_where=text("status IN ('QUEUED','RETRY_WAIT')"),
         ),
         Index("ix_jobs_status", "status"),
         Index("ix_jobs_created", "created_at"),
+        # Trailing-minute throughput in observability.snapshot.
+        Index("ix_jobs_succeeded", "updated_at", postgresql_where=text("status = 'SUCCEEDED'")),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     priority: Mapped[int] = mapped_column(Integer, server_default="0")
@@ -91,6 +106,18 @@ class Attempt(Base):
             unique=True,
             postgresql_where=text("finished_at IS NULL"),
         ),
+        # Recovery only looks at unfinished leases; history never needs an expiry index.
+        Index(
+            "ix_attempts_active_expiry",
+            "expires_at",
+            postgresql_where=text("finished_at IS NULL"),
+        ),
+        Index("ix_attempts_job_fence", "job_id", "fence"),
+        Index(
+            "ix_attempts_finished",
+            "finished_at",
+            postgresql_where=text("finished_at IS NOT NULL"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"))
@@ -99,9 +126,7 @@ class Attempt(Base):
     slot: Mapped[int] = mapped_column(Integer, server_default="0")
     claim_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), unique=True, default=uuid.uuid4)
     fence: Mapped[int] = mapped_column(Integer, server_default="1")
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
-    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     outcome: Mapped[str | None] = mapped_column(String(32))
     output: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     error: Mapped[str | None] = mapped_column(Text)
@@ -118,7 +143,7 @@ class Result(Base):
 
 class Event(Base):
     __tablename__ = "events"
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"), index=True)
     state: Mapped[str] = mapped_column(String(24))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -126,7 +151,7 @@ class Event(Base):
 
 class SystemEvent(Base):
     __tablename__ = "system_events"
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     kind: Mapped[str] = mapped_column(String(64))
     worker_id: Mapped[str | None] = mapped_column(String(100))
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")

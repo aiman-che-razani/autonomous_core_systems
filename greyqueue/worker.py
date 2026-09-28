@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
 import signal
 import uuid
@@ -12,6 +13,9 @@ from greyqueue.config import WorkerSettings
 from greyqueue.executors import Executor
 
 log = logging.getLogger("greyqueue.worker")
+TRANSIENT = {408, 429}  # plus every 5xx: retry the same request with backoff
+FENCED = {404, 409}  # on a job route: this attempt is no longer ours; drop only this job
+REJECTED = {413, 422}  # coordinator refused the payload; report a bounded failure instead
 
 
 def emit(event: str, **fields):
@@ -23,7 +27,7 @@ async def post(client: httpx.AsyncClient, path: str, body: dict):
     while True:
         try:
             response = await client.post(path, json=body)
-            if response.status_code < 500 and response.status_code != 429:
+            if response.status_code < 500 and response.status_code not in TRANSIENT:
                 response.raise_for_status()
                 return response.json()
             emit("coordinator_unavailable", status=response.status_code)
@@ -33,19 +37,23 @@ async def post(client: httpx.AsyncClient, path: str, body: dict):
         delay = min(delay * 2, 3)
 
 
-async def run():
-    config = WorkerSettings()
+async def run(
+    config: WorkerSettings | None = None, transport: httpx.AsyncBaseTransport | None = None
+):
+    # Both parameters exist for tests: a mock transport drives the real worker loop.
+    config = config or WorkerSettings()
     worker_id = config.worker_id or f"worker-{uuid.uuid4().hex[:12]}"
     identity = {"worker_id": worker_id}
     credential = secrets.token_urlsafe(32)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    if __import__("os").name != "nt":
+    if os.name != "nt":
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
     executor = Executor(config.executor, config.capacity)
     async with httpx.AsyncClient(
         base_url=config.coordinator_url,
+        transport=transport,
         timeout=5,
         headers={"Authorization": f"Bearer {config.worker_token}", "X-Worker-Session": credential},
     ) as client:
@@ -70,6 +78,23 @@ async def run():
                     stop.set()
                 await asyncio.sleep(heartbeat_interval)
 
+        async def finish(prefix, ownership, result, job_id):
+            try:
+                await post(client, prefix + "/finish", {**ownership, **result})
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in REJECTED:
+                    raise
+                # A result the coordinator cannot store must not crash the worker (and then
+                # every worker that retries the job); record it as a permanent failure.
+                status = exc.response.status_code
+                emit("result_rejected", worker_id=worker_id, job_id=job_id, status=status)
+                result = {
+                    "error": f"Coordinator rejected the result (HTTP {status})",
+                    "retryable": False,
+                }
+                await post(client, prefix + "/finish", {**ownership, **result})
+            return result
+
         async def consume(slot):
             while not stop.is_set():
                 try:
@@ -89,17 +114,17 @@ async def run():
                 job = assignment["job"]
                 ownership = {**identity, "token": assignment["token"]}
                 prefix = f"/internal/jobs/{job['id']}"
+                attempt = {
+                    "worker_id": worker_id,
+                    "job_id": job["id"],
+                    "attempt_id": assignment["token"],
+                    "fence": assignment["fence"],
+                }
                 renewal = None
                 execution = None
                 try:
                     await post(client, prefix + "/start", ownership)
-                    emit(
-                        "started",
-                        worker_id=worker_id,
-                        job_id=job["id"],
-                        attempt_id=assignment["token"],
-                        fence=assignment["fence"],
-                    )
+                    emit("started", **attempt)
 
                     async def renew(prefix=prefix, ownership=ownership):
                         while True:
@@ -113,24 +138,14 @@ async def run():
                     )
                     if renewal in done:
                         await renewal  # stale ownership propagates and cancels execution
-                    result = await execution
-                    await post(client, prefix + "/finish", {**ownership, **result})
+                    result = await finish(prefix, ownership, await execution, job["id"])
                     emit(
-                        "finished",
-                        worker_id=worker_id,
-                        job_id=job["id"],
-                        attempt_id=assignment["token"],
-                        status="FAILED" if "error" in result else "SUCCEEDED",
+                        "finished", **attempt, status="FAILED" if "error" in result else "SUCCEEDED"
                     )
                 except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code != 409:
+                    if exc.response.status_code not in FENCED:
                         raise
-                    emit(
-                        "lease_fenced",
-                        worker_id=worker_id,
-                        job_id=job["id"],
-                        attempt_id=assignment["token"],
-                    )
+                    emit("lease_fenced", **attempt, status=exc.response.status_code)
                 finally:
                     for task in (execution, renewal):
                         if task:
@@ -139,15 +154,29 @@ async def run():
                             with suppress(asyncio.CancelledError, httpx.HTTPStatusError):
                                 await task
 
-        heartbeat_task = asyncio.create_task(heartbeat())
-        try:
+        async def slots():
             async with asyncio.TaskGroup() as group:
                 for slot in range(config.capacity):
                     group.create_task(consume(slot))
+
+        # The heartbeat is supervised: if it fails (e.g. the session was revoked), stop the
+        # slots and surface the error instead of running on as a worker nobody can see.
+        heartbeat_task = asyncio.create_task(heartbeat())
+        slots_task = asyncio.create_task(slots())
+        try:
+            await asyncio.wait({heartbeat_task, slots_task}, return_when=asyncio.FIRST_COMPLETED)
+            if heartbeat_task.done():
+                slots_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await slots_task
+                heartbeat_task.result()
+            else:
+                slots_task.result()
         finally:
-            heartbeat_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await heartbeat_task
+            for task in (heartbeat_task, slots_task):
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
             await executor.close()
 
 

@@ -156,8 +156,15 @@ def upgrade():
 
 
 def downgrade():
-    # Refuse lossy downgrades; stop workers and resolve new states first.
+    # Refuse downgrades that would change the meaning of live work; stop workers and
+    # resolve new states first. Deliberately dropped on downgrade: priorities, retry
+    # settings, idempotency keys, metadata, schedules, dependencies, attempt
+    # outcome/output/error and all of system_events. Back up before downgrading.
     connection = op.get_bind()
+    if connection.scalar(
+        sa.text("SELECT EXISTS(SELECT 1 FROM attempts WHERE finished_at IS NULL)")
+    ):
+        raise RuntimeError("Stop workers and let active attempts finish or expire first")
     if connection.scalar(
         sa.text("SELECT EXISTS(SELECT 1 FROM jobs WHERE status IN ('RETRY_WAIT','DEAD_LETTER'))")
     ):

@@ -6,6 +6,28 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validato
 
 from greyqueue.tasks import REGISTRY
 
+WORKER_ID = r"^[a-zA-Z0-9_-]+$"
+STATUSES = (
+    "QUEUED",
+    "LEASED",
+    "RUNNING",
+    "SUCCEEDED",
+    "FAILED",
+    "CANCELLED",
+    "RETRY_WAIT",
+    "DEAD_LETTER",
+)
+
+
+def storable(value: Any, limit: int, label: str) -> str:
+    """Canonical JSON within limit; PostgreSQL JSONB/text reject NUL characters."""
+    encoded = json.dumps(value, allow_nan=False)
+    if len(encoded) > limit:
+        raise ValueError(f"{label} too large")
+    if "\\u0000" in encoded:
+        raise ValueError(f"{label} must not contain NUL characters")
+    return encoded
+
 
 class Submit(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -22,15 +44,17 @@ class Submit(BaseModel):
     depends_on: UUID | None = None
 
     @model_validator(mode="after")
-    def bounded_metadata(self):
-        if len(json.dumps(self.metadata, allow_nan=False)) > 8000:
-            raise ValueError("Metadata too large")
+    def bounded_metadata(self) -> "Submit":
+        storable(self.metadata, 8000, "Metadata")
+        # Sizes of args/keys are bounded by the task models and Field limits; only NULs here.
+        storable(self.args, 131072, "Arguments")
+        storable(self.idempotency_key, 131072, "Idempotency key")
         return self
 
 
 class Identity(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    worker_id: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
+    worker_id: str = Field(min_length=1, max_length=100, pattern=WORKER_ID)
 
 
 class Registration(Identity):
@@ -39,7 +63,7 @@ class Registration(Identity):
     session_token: str = Field(min_length=32, max_length=128)
 
     @model_validator(mode="after")
-    def known_capabilities(self):
+    def known_capabilities(self) -> "Registration":
         if not self.capabilities or not set(self.capabilities) <= REGISTRY.keys():
             raise ValueError("Unknown or empty task capabilities")
         return self
@@ -60,9 +84,9 @@ class Completion(Assignment):
     retryable: bool = False
 
     @model_validator(mode="after")
-    def result_shape(self):
+    def result_shape(self) -> "Completion":
         if (self.output is None) == (self.error is None):
             raise ValueError("Provide exactly one of output or error")
-        if len(json.dumps(self.output, allow_nan=False)) > 64000:
-            raise ValueError("Output too large")
+        storable(self.output, 64000, "Output")
+        storable(self.error, 131072, "Error")
         return self

@@ -2,14 +2,32 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import create_engine, text
 
 from greyqueue.models import Base
+from greyqueue.protocol import STATUSES
+
+pytestmark = pytest.mark.integration
+WORKER_STATES = {"HEALTHY", "SUSPECT", "DEAD", "DRAINING"}
+
+
+def check_values(db, table: str) -> set[str]:
+    # `alembic check` never compares CHECK constraints, so verify their values directly.
+    definitions = db.scalars(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conrelid = CAST(:table AS regclass) AND contype = 'c'"
+        ),
+        {"table": table},
+    )
+    return {value for d in definitions for value in re.findall(r"'([A-Z_]+)'", d)}
 
 
 def test_upgrade_preserves_v01_results_and_downgrades(database):
@@ -67,6 +85,8 @@ def test_upgrade_preserves_v01_results_and_downgrades(database):
             assert db.scalar(
                 text("SELECT claim_id IS NOT NULL FROM attempts WHERE id=:a"), {"a": attempt}
             )
+            assert check_values(db, "jobs") == set(STATUSES)
+            assert check_values(db, "workers") == WORKER_STATES
         migrate("check")
         migrate("downgrade", "5cb4bac13ed5")
         migrate("upgrade", "head")

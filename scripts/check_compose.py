@@ -9,6 +9,8 @@ import httpx
 
 from greyqueue.config import settings
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def main():
     config = settings()
@@ -71,7 +73,8 @@ def main():
                 "metrics",
             ],
         }
-        path = Path(__file__).resolve().parents[1] / "docs/results/compose.json"
+        path = ROOT / "docs/results/compose.json"
+        path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print("PASS: Docker Compose, 100 jobs, three workers, dashboard and metrics", flush=True)
 

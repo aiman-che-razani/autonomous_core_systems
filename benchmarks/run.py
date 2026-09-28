@@ -16,6 +16,8 @@ from sqlalchemy import text
 
 from scripts.harness import ROOT, Cluster
 
+SUBMISSION_CONCURRENCY = 12
+
 
 def percentile(values, fraction):
     values = sorted(values)
@@ -83,7 +85,7 @@ async def measure(cluster, count, kind):
 
     task = asyncio.create_task(monitor())
     start = time.monotonic()
-    semaphore = asyncio.Semaphore(12)
+    semaphore = asyncio.Semaphore(SUBMISSION_CONCURRENCY)
     async with httpx.AsyncClient(
         base_url=cluster.base,
         timeout=30,
@@ -216,7 +218,7 @@ def main():
         "ram_gb": round(psutil.virtual_memory().total / 1024**3, 2),
         "database": "PostgreSQL 18 on loopback",
         "transport": "HTTP loopback",
-        "submission_concurrency": 12,
+        "submission_concurrency": SUBMISSION_CONCURRENCY,
         "resource_scope": "Coordinator and worker process trees; excludes PostgreSQL, load generator and Docker",
         "cpu_unit": "Sum of per-process CPU percentages; 100% is one logical core",
         "notes": "Single local runs including cold task pools; exclude cluster startup; no cross-host or production claim",

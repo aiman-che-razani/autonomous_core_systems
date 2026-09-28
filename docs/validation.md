@@ -2,9 +2,9 @@
 
 ## Automated checks
 
-38 tests passed against PostgreSQL and Python 3.12.14 on Windows. Coverage includes concurrent claims, capacity, priority/capability filtering, scheduled dependencies, deduplication, retry/backoff, expiry/fencing, worker identity, draining, timeouts across four executors, HTTP bounds/TLS enforcement and v0.1 migration preservation with downgrade/re-upgrade.
+56 tests passed against PostgreSQL and Python 3.12.14 on Windows (31 run against a real PostgreSQL schema; 25 need no database). Coverage includes concurrent claims, capacity, priority/capability filtering, scheduled dependencies, deduplication, retry/backoff, expiry/fencing, claim replay after a worker changes state, renewal only after start, worker identity and DEAD-ID re-registration, draining, timeouts across four executors, oversized/unstorable task results, the real worker loop against a mock coordinator (rejected results, revoked sessions), process pools that start every process up front, idempotent-replay status codes, uniform 422 bodies, HTTP bounds, host-header and malformed-credential rejection, TLS-required (426) rejection, Prometheus type lines, and v0.1 migration preservation with CHECK-constraint verification, downgrade and re-upgrade.
 
-Ruff lint and formatting pass. Alembic reports no schema drift. Two upstream TestClient deprecation warnings remain visible; they do not fail tests.
+Ruff lint and formatting pass. Alembic reports no schema drift, with server-default comparison enabled. Two upstream TestClient deprecation warnings remain visible; they do not fail tests.
 
 ## Phase evidence
 
@@ -17,10 +17,12 @@ Ruff lint and formatting pass. Alembic reports no schema drift. Two upstream Tes
 | v0.6 measurements | `python -m benchmarks.run --jobs 10000 --strategy hybrid --workload light` | [10,000 jobs](results/benchmark-10000-hybrid-light.json), [1,000 jobs](results/benchmark-1000-hybrid-mixed.json), [read optimization](results/read-optimization.json) |
 | v1.0 hardening/extensions | Tests + two-coordinator experiment + Compose check | [Process experiments](results/experiments.json), [Docker verification](results/compose.json), security/migration tests |
 
-All seven native process experiments passed, including an actual temporary outage of the isolated project PostgreSQL cluster. Browser checks passed with zero JavaScript errors and no horizontal overflow at a 390-pixel viewport. Both side-effect experiments used real child process exits after independent sink commits.
+Apart from `compose.json`, the files in `results/` were recorded at the v1.0 release. The post-release audit fixes (claim replay, renewal, worker error handling, queue indexes, dashboard states, container hardening) were verified by the automated tests above, a local multi-process smoke run and the Compose run below; the recorded process, browser and benchmark evidence has not yet been regenerated for them. Re-run the demonstrations above to refresh it.
+
+At v1.0, all seven native process experiments passed, including an actual temporary outage of the isolated project PostgreSQL cluster. Browser checks passed with zero JavaScript errors and no horizontal overflow at a 390-pixel viewport. Both side-effect experiments used real child process exits after independent sink commits.
 
 The benchmark matrix and larger runs completed with zero execution failures/retries. These are single-machine observations with full environment metadata, not production capacity claims. Historical v0.1 evidence is preserved separately in [v0.1-smoke.json](results/v0.1-smoke.json).
 
-CI repeats PostgreSQL tests, migration checks, process/browser demonstrations and an image build. Its remote outcome is separate from these local results.
+CI repeats PostgreSQL tests, migration checks, process/browser demonstrations, an image build and the full Compose check. It does not run the database-outage experiment or the benchmarks. Its remote outcome is separate from these local results.
 
-Docker Compose was built and run locally with PostgreSQL and three Linux worker containers. All 100 submitted jobs succeeded, distributed 34 / 33 / 33, with working dashboard and metrics endpoints. Verification containers were stopped afterwards; their named database volume is preserved.
+Docker Compose was rebuilt and run locally after the audit fixes, from digest-pinned images, with PostgreSQL, the migration, the least-privilege role step and three Linux worker containers. All 100 submitted jobs succeeded, distributed 34 / 33 / 33, with working dashboard and metrics endpoints ([compose.json](results/compose.json)). In the same run the coordinator was confirmed to connect as the non-superuser `greyqueue_app`, which could read and update rows but was refused CREATE TABLE, DELETE, TRUNCATE and `alembic_version`; a volume with existing history but no role was upgraded by the next `up` (run twice, both idempotent); and a rebinding Host header got 400. Those role and upgrade checks were run by hand and are not part of `compose.json`. The stack was run under a separate Compose project and removed afterwards.

@@ -107,6 +107,7 @@ def test_http_validation_and_restart_persistence(database):
         database_url=url,
         client_token="client-token-for-testing",
         worker_token="worker-token-for-testing",
+        allowed_hosts=["testserver"],
     )
     headers = {"Authorization": f"Bearer {config.client_token}"}
     with TestClient(create_app(config)) as client:

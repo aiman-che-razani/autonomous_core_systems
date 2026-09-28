@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,7 @@ from greyqueue.scheduler import scheduler
 from greyqueue.tasks import validate
 
 TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED", "DEAD_LETTER"}
+ACTIVE = {"QUEUED", "RETRY_WAIT", "LEASED", "RUNNING"}
 TRANSITIONS = {
     "QUEUED": {"LEASED", "CANCELLED"},
     "RETRY_WAIT": {"LEASED", "CANCELLED"},
@@ -35,7 +37,16 @@ class Saturated(Exception):
     pass
 
 
+class Invalid(ValueError):
+    """A submission field is valid JSON but not acceptable; `field` names it for the API."""
+
+    def __init__(self, message: str, field: str):
+        super().__init__(message)
+        self.field = field
+
+
 def now() -> datetime:
+    # Test/fixture helper only; ownership decisions use database_time().
     return datetime.now(UTC)
 
 
@@ -52,7 +63,11 @@ def transition(session: Session, job: Job, state: str) -> None:
     session.add(Event(job_id=job.id, state=state))
 
 
-def submit(
+def submit(session: Session, task: str, args: dict[str, Any], **options: Any) -> Job:
+    return admit(session, task, args, **options)[0]
+
+
+def admit(
     session: Session,
     task: str,
     args: dict[str, Any],
@@ -63,13 +78,19 @@ def submit(
     retry_delay: float = 1,
     retry_jitter: bool = True,
     idempotency_key: str | None = None,
-    metadata: dict | None = None,
+    metadata: dict[str, Any] | None = None,
     scheduled_at: datetime | None = None,
     depends_on: UUID | None = None,
     queue_limit: int = 10000,
     submissions_per_minute: int = 20000,
-) -> Job:
-    args = validate(task, args)
+) -> tuple[Job, bool]:
+    """Admit a job; returns it and whether it was created (False for an idempotent replay)."""
+    try:
+        args = validate(task, args)
+    except ValidationError:
+        raise  # per-argument errors; the API reports them under body.args
+    except ValueError as exc:
+        raise Invalid(str(exc), "task") from exc
     definition = {
         "task": task,
         "args": args,
@@ -92,9 +113,10 @@ def submit(
         if existing:
             if existing.request_hash != digest:
                 raise Conflict("Idempotency key already used for a different definition")
-            return existing
+            return existing, False
     timestamp = database_time(session)
-    count = session.scalar(select(func.count()).select_from(Job).where(Job.status.not_in(TERMINAL)))
+    # IN over the active states uses ix_jobs_status; NOT IN (TERMINAL) scans all history.
+    count = session.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE)))
     rate = session.scalar(
         select(func.count())
         .select_from(Job)
@@ -103,7 +125,10 @@ def submit(
     if count >= queue_limit or rate >= submissions_per_minute:
         raise Saturated("Admission limit reached; retry later with the same idempotency key")
     if depends_on:
-        parent = get_job(session, depends_on)
+        try:
+            parent = get_job(session, depends_on)
+        except Missing as exc:
+            raise Invalid("Dependency job not found", "depends_on") from exc
         if parent.status in TERMINAL - {"SUCCEEDED"}:
             raise Conflict("Dependency already failed or was cancelled")
     job = Job(
@@ -119,11 +144,14 @@ def submit(
         metadata_json=metadata or {},
         depends_on=depends_on,
         available_at=scheduled_at or timestamp,
+        # Same clock as the rate window; server now() is transaction start, before the lock wait.
+        created_at=timestamp,
+        updated_at=timestamp,
     )
     session.add(job)
     session.flush()
     session.add_all([Event(job_id=job.id, state="SUBMITTED"), Event(job_id=job.id, state="QUEUED")])
-    return job
+    return job, True
 
 
 def get_job(session: Session, job_id: UUID, lock: bool = False) -> Job:
@@ -152,10 +180,11 @@ def claim(
     )
     if worker is None:
         raise Missing("Register worker first")
-    if worker.state != "HEALTHY":
-        return None
     if slot < 0 or slot >= worker.capacity:
         raise Conflict("Worker capacity exceeded")
+    # Replays come before the health check: a claim committed while the worker was HEALTHY
+    # must be returned even if the response was lost and the worker has since become
+    # SUSPECT or DRAINING; otherwise the lease is orphaned and burns a retry.
     if claim_id:
         existing = session.scalar(select(Attempt).where(Attempt.claim_id == claim_id))
         if existing:
@@ -173,6 +202,8 @@ def claim(
         if claim_id and attempt.claim_id != claim_id:
             raise Conflict("Slot is occupied")
         return get_job(session, attempt.job_id), attempt
+    if worker.state != "HEALTHY":
+        return None
     timestamp = database_time(session)
     job = session.scalar(
         scheduler(policy).query(worker, timestamp).with_for_update(skip_locked=True).limit(1)
@@ -226,10 +257,14 @@ def renew(
     session: Session, job_id: UUID, worker_id: str, token: UUID, lease_seconds: float
 ) -> datetime:
     job, attempt = owned(session, job_id, worker_id, token)
+    # Unstarted leases are not renewable, so the timeout+5s execution cap always applies.
+    if attempt.started_at is None:
+        raise Conflict("Start the assignment before renewing it")
     timestamp = database_time(session)
-    expiry = timestamp + timedelta(seconds=lease_seconds)
-    if attempt.started_at:
-        expiry = min(expiry, attempt.started_at + timedelta(seconds=job.timeout + 5))
+    expiry = min(
+        timestamp + timedelta(seconds=lease_seconds),
+        attempt.started_at + timedelta(seconds=job.timeout + 5),
+    )
     if expiry <= timestamp:
         raise Conflict("Execution deadline passed")
     attempt.expires_at = expiry
@@ -297,7 +332,9 @@ def cancel(session: Session, job_id: UUID) -> None:
     transition(session, job, "CANCELLED")
 
 
-def serialize(session: Session, job: Job, results: dict | None = None) -> dict[str, Any]:
+def serialize(
+    session: Session, job: Job, results: dict[UUID, Result] | None = None
+) -> dict[str, Any]:
     result = results.get(job.id) if results is not None else session.get(Result, job.id)
     return {
         "id": str(job.id),

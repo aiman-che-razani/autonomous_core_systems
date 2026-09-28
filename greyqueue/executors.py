@@ -8,16 +8,49 @@ import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
-from greyqueue.tasks import RetryableTaskError, execute
+from greyqueue.tasks import RetryableTaskError, execute, message
+
+# Task processes get just enough environment to start Python; never the worker's
+# WORKER_TOKEN or anything else read from .env.
+TASK_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PYTHONPATH", "VIRTUAL_ENV", "LANG")
+OUTPUT_LIMIT = 64000  # protocol.Completion rejects larger output
+
+
+_rendezvous_barrier = None
+
+
+def _bind_barrier(barrier) -> None:
+    global _rendezvous_barrier
+    _rendezvous_barrier = barrier
+
+
+def _rendezvous() -> None:
+    # Each warm-up task holds its process until all `capacity` processes are running.
+    _rendezvous_barrier.wait(timeout=120)
 
 
 def invoke(job: dict) -> dict:
     try:
         return {"output": execute(job["task"], job["args"], job.get("attempt_count", 1))}
     except RetryableTaskError as exc:
-        return {"error": str(exc), "retryable": True}
+        return {"error": message(exc), "retryable": True}
     except ValueError as exc:
-        return {"error": str(exc), "retryable": False}
+        return {"error": message(exc), "retryable": False}
+
+
+def bounded(result: dict) -> dict:
+    """Reject output the coordinator would refuse, as a permanent task failure."""
+    if "output" not in result:
+        return result
+    try:
+        encoded = json.dumps(result["output"], allow_nan=False)
+    except (TypeError, ValueError):
+        return {"error": "Task output is not JSON-serialisable", "retryable": False}
+    if len(encoded) > OUTPUT_LIMIT:
+        return {"error": f"Task output exceeds {OUTPUT_LIMIT} characters", "retryable": False}
+    if "\\u0000" in encoded:
+        return {"error": "Task output contains NUL characters", "retryable": False}
+    return result
 
 
 class Executor:
@@ -27,11 +60,25 @@ class Executor:
         if strategy == "thread":
             self.pool = ThreadPoolExecutor(max_workers=capacity)
         elif strategy in {"process", "hybrid"}:
+            context = multiprocessing.get_context("spawn")
             self.pool = ProcessPoolExecutor(
-                max_workers=capacity, mp_context=multiprocessing.get_context("spawn")
+                max_workers=capacity,
+                mp_context=context,
+                initializer=_bind_barrier,
+                initargs=(context.Barrier(capacity),),
             )
+            # The pool spawns lazily inside submit(), on the event-loop thread. A job could
+            # then start on a warm process while the loop is still blocked spawning another,
+            # and its timeout clock would start late. Start every process up front: the
+            # warm-up tasks block on a shared barrier, so no process becomes idle (and gets
+            # reused) until all `capacity` processes exist.
+            for warm in [self.pool.submit(_rendezvous) for _ in range(capacity)]:
+                warm.result()
 
     async def run(self, job: dict) -> dict:
+        return bounded(await self.dispatch(job))
+
+    async def dispatch(self, job: dict) -> dict:
         if self.strategy == "subprocess":
             return await self.subprocess(job)
         if self.strategy == "hybrid" and job["task"] == "sleep":
@@ -60,6 +107,7 @@ class Executor:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={key: os.environ[key] for key in TASK_ENV if key in os.environ},
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         try:
@@ -69,7 +117,7 @@ class Executor:
             if process.returncode:
                 return {
                     "error": f"Task process exited {process.returncode}: "
-                    + stderr.decode()[-1000:],
+                    + stderr.decode(errors="replace")[-1000:],
                     "retryable": True,
                 }
             return json.loads(stdout)

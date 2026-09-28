@@ -33,6 +33,11 @@ class RetryableTaskError(Exception):
     pass
 
 
+def message(exc: Exception) -> str:
+    """Completion errors must be non-empty; fall back to the exception type."""
+    return (str(exc) or type(exc).__name__)[:4000]
+
+
 REGISTRY = {"flaky": FlakyArgs, "sleep": SleepArgs, "calculate_pi": PiArgs, "hash_text": HashArgs}
 
 
@@ -70,7 +75,7 @@ if __name__ == "__main__":
             "output": execute(request["task"], request["args"], request.get("attempt_count", 1))
         }
     except RetryableTaskError as exc:
-        result = {"error": str(exc), "retryable": True}
+        result = {"error": message(exc), "retryable": True}
     except ValueError as exc:
-        result = {"error": str(exc), "retryable": False}
+        result = {"error": message(exc), "retryable": False}
     json.dump(result, sys.stdout, allow_nan=False)
