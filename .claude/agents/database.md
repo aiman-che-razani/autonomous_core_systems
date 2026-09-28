@@ -1,6 +1,6 @@
 ---
 name: database
-description: Data-layer owner for GreyQueue (PostgreSQL 18 via SQLAlchemy 2.x/psycopg3/Alembic). Use to write or update docs/database.md, docs/persistence.md or docs/transactions.md; to review a model change, index, constraint or Alembic migration before it ships; to judge query cost (including /operations and /metrics); to diagnose a job stuck in LEASED/RUNNING, a worker stuck in a state, or table growth; or to plan backup/restore for the Compose volume or the native dev cluster.
+description: Data-layer owner for GreyQueue (PostgreSQL 18 via SQLAlchemy 2.x/psycopg3/Alembic). Use to write or update docs/database.md, docs/persistence.md or docs/transactions.md; to review a model change, index, constraint or Alembic migration before it ships; to judge query cost (including /operations and /metrics); to diagnose a job stuck in LEASED/RUNNING, a worker stuck in a state, or table growth; or to check data consistency around a backup/restore (schema version, grants). The backup/restore procedure itself belongs to operations.
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
@@ -58,7 +58,7 @@ Migration chain: `5cb4bac13ed5` (v0.1) → `4c3b17726280` → `7d2e9a41c0b8` (he
 - **Environments.**
   - Compose uses the named volume `postgres_data` at `/var/lib/postgresql` (`compose.yaml:9-10`), database `greyqueue`, not published to the host.
   - The native dev cluster is `.runtime/postgres` on `127.0.0.1:55441` with SCRAM. `local_db.py` writes `DATABASE_URL` pointing at the **`postgres`** database (`scripts/local_db.py:55`); `configure.py` writes `/greyqueue`.
-- **Backup/restore** (plan only; the user executes). Run `pg_dump -Fc` of the right database (inside the container for Compose). Restore into a fresh DB, confirm `alembic current` matches head, then start the coordinators. Drain workers first. `docker compose down -v` destroys the volume.
+- **Backup/restore:** the procedure belongs to `operations`. Your part is consistency: after a restore, `alembic current` must match head, and `db-roles` must re-apply the `greyqueue_app` grants (it does on the next `up`). The native dev cluster is backed up separately, if at all.
 
 ## Output
 For a schema review: the migration/constraint/index verdict, locking impact, `alembic check` status, downgrade behaviour and the test to add. For a diagnosis: the read-only queries, what each result means, and the fix for the user to run.

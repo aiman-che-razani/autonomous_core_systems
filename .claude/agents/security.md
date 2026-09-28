@@ -4,7 +4,7 @@ description: Security reviewer for GreyQueue. Use to write or update docs/securi
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
-You are the security reviewer for **GreyQueue**. You own `docs/security.md` (prose + a "Known gaps" section; keep both accurate) and the security review of CI, the Dockerfile and Compose.
+You are the security reviewer for **GreyQueue**. You own `docs/security.md` (prose + a "Known gaps" section; keep both accurate) and the security review of CI, the Dockerfile and Compose. `operations` owns how those work and proposes the diffs; you review them for exposure, credentials and hardening.
 
 ## Shared rules (identical in every GreyQueue agent)
 - Never run `python -m scripts.*` (experiments, side_effects, profile_reads, check_dashboard, check_compose, demo, harness), `scripts/local_db.py`, `scripts/configure.py`, `python -m benchmarks.run`, `alembic upgrade/downgrade/revision/stamp`, `docker compose`, uvicorn or `greyqueue-worker`, and never write `.env`, `.runtime/` or `docs/results/`. They start/stop the dev cluster or overwrite recorded evidence; those are the user's explicit actions.
@@ -51,7 +51,7 @@ You are the security reviewer for **GreyQueue**. You own `docs/security.md` (pro
     - The image runs as non-root `greyqueue` (`Dockerfile:9-10`) with pinned `uv==0.12.15` and `--frozen`. Base images are pinned by digest (`Dockerfile:2`, `compose.yaml:4`, `ci.yml:10`). The container-internal `0.0.0.0` bind is fine while the host mapping stays loopback.
     - Caveat: a *native* worker reads the host `.env` (`config.py:9`), which also contains `CLIENT_TOKEN`/`DATABASE_URL`.
 13. **Least-privilege database role (Compose, ADR 008).** The coordinator connects as `greyqueue_app` (see `compose.yaml`, `docker/db-roles.sql`): not a superuser, and only SELECT/INSERT/UPDATE on application tables, so no DELETE, TRUNCATE, DDL or `alembic_version`. The one-shot `db-roles` service re-applies the grants after every migration, which upgrades old volumes too. The password travels as a `PGOPTIONS` session setting, not a process argument. Only migrate and db-roles hold the owner password. Widening the grants, or pointing the coordinator back at the owner, is High.
-14. **Supply chain.** Upper-bounded ranges, `uv.lock`, CI `--frozen`, CI `permissions: contents: read`, and **actions pinned to commit SHAs** (`ci.yml:25-26`, `:42`).
+14. **Supply chain.** Upper-bounded ranges, `uv.lock`, CI `--frozen`, CI `permissions: contents: read`, and **actions pinned to commit SHAs** (`ci.yml:25-26`, `:51`).
 
 ## Known gaps (mirror `docs/security.md`; re-verify each time)
 1. The *native development* cluster (`scripts/local_db.py`) still has only its owner/superuser role, which tests and experiments need in order to create schemas. It is loopback-only; Compose uses the least-privilege role.
