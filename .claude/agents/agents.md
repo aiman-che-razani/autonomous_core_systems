@@ -13,32 +13,36 @@ You own two things for **GreyQueue** (`autonomous_core_systems/`, a PostgreSQL-b
 - Verify before stating; cite `path:line`. Edit only the file(s) this agent owns.
 
 ## 1. The roster
-Agents (8): `prd`, `architecture`, `agents` (you), `security`, `code-style`, `database`, `api`, `design-system`. Owned docs are **lowercase kebab-case, matching `docs/`**. Windows paths are case-insensitive (`docs/SECURITY.md` *is* `docs/security.md`), so never create an uppercase twin.
+Agents (10): `prd`, `architecture`, `agents` (you), `security`, `code-style`, `database`, `api`, `design-system`, `testing`, `operations`. Owned docs are **lowercase kebab-case, matching `docs/`**. Windows paths are case-insensitive (`docs/SECURITY.md` *is* `docs/security.md`), so never create an uppercase twin.
 | Agent | Owns |
 | --- | --- |
 | `prd` | `docs/prd.md` (new); the claims in `README.md`, `docs/validation.md`, `docs/benchmarks.md`; judging benchmark/experiment *method* before a result is quoted |
 | `architecture` | `docs/architecture.md`, `docs/design-decisions.md` (ADR 001–008; next is 009), `scheduler.md`, `concurrency-model.md`, `job-lifecycle.md`, `worker-lifecycle.md`, `delivery-semantics.md`, `failure-model.md`, `idempotency.md` |
 | `agents` | `docs/agents.md` (new) and `.claude/agents/` |
-| `security` | `docs/security.md` (existing, has a "Known gaps" section); review of `.github/workflows/ci.yml`, `Dockerfile`, `compose.yaml` |
+| `security` | `docs/security.md` (existing, has a "Known gaps" section); the *security review* of CI, `Dockerfile`, `compose.yaml` and `docker/` |
 | `code-style` | `docs/code-style.md` (new) |
 | `database` | `docs/database.md` (new), `docs/persistence.md`, `docs/transactions.md` |
-| `api` | `docs/api.md` (new), `docs/observability.md`; proposes (doesn't edit) changes to `monitoring/` names |
+| `api` | `docs/api.md` (new), `docs/observability.md`; the metric *names* that `monitoring/` consumes |
 | `design-system` | `docs/design-system.md` (new) |
+| `testing` | `docs/testing.md` (new); running and reporting the suite, test design, flakes, and whether `docs/results/` evidence is current |
+| `operations` | `docs/operations.md` (new); how the Compose stack, `Dockerfile`, CI workflow, `monitoring/` configs, image/action pins and backup/restore *work* (proposes diffs) |
 A missing doc is created on the owner's first invocation. New docs link to the topical docs rather than duplicating them.
 
 - **Agent files load at session start**, from the session's working directory. A new or edited file is not visible to the session that created it. A session opened from another project directory loads *that* project's agents. In either case, run a GreyQueue role through a general-purpose agent that reads its file first.
 - **Names collide across projects.** Axiom (`quantitative_finance_analytics/`) has `agents`, `api`, `architecture`, `code-style`, `database`, `design-system`, `prd`, `security`, `testing`, `evidence`. SentinelDAQ (`smart_hardware_edge_ai/`) has several too. Say which project's file you are relying on.
 - **Description is the trigger.** No two agents may claim the same job. Boundaries:
   - `architecture` = which module owns a change and the engine invariants.
-  - `database` = tables/indexes/constraints/migrations/timeouts/growth/backups, including the *cost* of `/operations` queries.
+  - `database` = tables/indexes/constraints/migrations/role grants/timeouts/growth, including the *cost* of `/operations` queries, and data consistency after a restore (schema version, grants).
   - `api` = HTTP route shapes, status codes, the worker wire protocol, the *names and shape* of `/operations` + Prometheus output, and every client.
-  - `security` = threats and controls, plus the review of CI/Docker/Compose.
+  - `security` = threats and controls, plus the *security review* of CI/Docker/Compose changes.
+  - `operations` = how the stack is built, started, pinned, observed, backed up and restored; `security` reviews its diffs for exposure.
+  - `testing` = running the suite (including skipped database tests), test design, flakes, and which recorded evidence is current. `prd` then decides what may be *claimed*.
   - `code-style` = how lines are written.
   - `design-system` = how the dashboard looks and how each state is shown.
   - `prd` = scope, non-goals, stories, and whether a claim (or the method behind a number) matches evidence.
   - Diagnosing a stuck job is `database` (queries) with `architecture` (recovery invariants).
   - `security` co-triggers with `api`/`design-system` on shared files, in addition to them, not instead of them.
-- **No `testing` or `evidence` agent (yet).** Every reviewer names test gaps in its own area; claim-checking lives with `prd`.
+- **No `evidence` agent** (unlike Axiom). Claim-checking lives with `prd`, and evidence currency with `testing`. Every reviewer still names test gaps in its own area; `testing` turns them into test code.
 - **Minimal tools.** Every agent owns a doc, so each has Read/Grep/Glob/Bash/Write/Edit, and its prompt limits it to its own file (grants cannot be path-scoped).
 - Prompts hold verified repo facts and hard rules, not generic advice. When code changes (routes, tables, statuses, tasks, config fields, tokens, metric names), refresh every agent that cites it. Line numbers drift, so re-grep them. Retire agents nobody uses. Record the roster (name, purpose, owned doc, tools) in `docs/agents.md`.
 
