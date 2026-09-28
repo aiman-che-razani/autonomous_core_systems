@@ -9,6 +9,8 @@ from greyqueue import service
 from greyqueue.models import Attempt, Job, Worker
 from greyqueue.recovery import detect_workers, recover_jobs
 
+pytestmark = pytest.mark.integration
+
 
 def worker(db, name="w", capacity=1, capabilities=None):
     db.add(
@@ -91,6 +93,9 @@ def test_renewal_blocks_recovery(database):
         worker(db)
         job = service.submit(db, "sleep", {"seconds": 0.0})
         _, attempt = service.claim(db, "w")
+        with pytest.raises(service.Conflict):
+            service.renew(db, job.id, "w", attempt.id, 30)  # unstarted leases don't renew
+        service.start(db, job.id, "w", attempt.id)
         service.renew(db, job.id, "w", attempt.id, 30)
         assert recover_jobs(db) == 0
 
@@ -127,9 +132,14 @@ def test_schedule_dependency_and_drain(database):
         service.start(db, job.id, "w", attempt.id)
         service.finish(db, job.id, "w", attempt.id, {}, None)
     with sessions.begin() as db:
-        assert service.claim(db, "w")[0].id == child.id
+        current = service.claim(db, "w")
+        assert current[0].id == child.id
         db.get(Worker, "w").state = "DRAINING"
         db.flush()
+        # Draining still reports the slot's current assignment, but hands out no new work.
+        assert service.claim(db, "w") == current
+        service.start(db, child.id, "w", current[1].id)
+        service.finish(db, child.id, "w", current[1].id, {}, None)
         assert service.claim(db, "w") is None
         assert db.get(Job, future.id).status == "QUEUED"
 
@@ -166,6 +176,25 @@ def test_claim_replay_same_request(database):
             service.claim(db, "w", claim_id=uuid4())
 
 
+@pytest.mark.parametrize("state", ["SUSPECT", "DRAINING", "DEAD"])
+def test_claim_replay_survives_worker_state_change(database, state):
+    # A claim committed while HEALTHY whose response was lost must replay after the worker
+    # changes state; otherwise the lease is orphaned and expiry burns a retry.
+    sessions, _ = database
+    token = uuid4()
+    with sessions.begin() as db:
+        worker(db)
+        service.submit(db, "sleep", {"seconds": 0.0}, max_retries=0)
+        _, first = service.claim(db, "w", claim_id=token)
+        first_id = first.id
+    with sessions.begin() as db:
+        db.get(Worker, "w").state = state
+    with sessions.begin() as db:
+        job, second = service.claim(db, "w", claim_id=token)
+        assert second.id == first_id
+        assert service.claim(db, "w", 0) == (job, second)  # slot still reported as occupied
+
+
 def test_cached_worker_cannot_claim_after_drain(database):
     sessions, _ = database
     with sessions.begin() as db:
@@ -191,6 +220,22 @@ def test_expired_unstarted_claim_is_recovered(database):
         recover_jobs(db)
     with sessions() as db:
         assert db.get(Job, job_id).status == "RETRY_WAIT"
+
+
+def test_missing_dependency_is_a_validation_error(database):
+    sessions, _ = database
+    with pytest.raises(ValueError, match="Dependency"), sessions.begin() as db:
+        service.submit(db, "sleep", {"seconds": 0.0}, depends_on=uuid4())
+
+
+def test_admission_counts_only_active_jobs(database):
+    sessions, _ = database
+    with sessions.begin() as db:
+        done = service.submit(db, "sleep", {"seconds": 0.0})
+        service.cancel(db, done.id)
+        # Terminal history does not consume the queue limit.
+        service.submit(db, "sleep", {"seconds": 0.0}, queue_limit=1)
+        assert done.created_at <= service.database_time(db)
 
 
 def test_dependency_failure_propagates(database):

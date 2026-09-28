@@ -8,3 +8,4 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 /dist/
+/docs/results/compose-ci.log

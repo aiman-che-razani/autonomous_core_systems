@@ -1,5 +1,10 @@
-"""SQL policies share the same locked claim path and capacity checks."""
+"""SQL policies share the same locked claim path and capacity checks.
 
+Each ORDER BY matches a partial index (ix_jobs_queue_fifo / ix_jobs_queue_priority), so a
+claim reads the head of the queue instead of sorting every eligible row.
+"""
+
+from datetime import datetime
 from typing import Protocol
 
 from sqlalchemy import Select, or_, select
@@ -9,11 +14,11 @@ from greyqueue.models import Job, Worker
 
 
 class Scheduler(Protocol):
-    def query(self, worker: Worker, timestamp) -> Select: ...
+    def query(self, worker: Worker, timestamp: datetime) -> Select: ...
 
 
 class FIFOScheduler:
-    def query(self, worker: Worker, timestamp) -> Select:
+    def query(self, worker: Worker, timestamp: datetime) -> Select:
         parent = aliased(Job)
         ready_parent = (
             select(parent.id)
@@ -33,7 +38,7 @@ class FIFOScheduler:
 
 
 class PriorityScheduler(FIFOScheduler):
-    def query(self, worker: Worker, timestamp) -> Select:
+    def query(self, worker: Worker, timestamp: datetime) -> Select:
         return (
             super()
             .query(worker, timestamp)

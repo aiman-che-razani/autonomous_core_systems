@@ -1,14 +1,19 @@
 """Durable operational metrics, derived from SQL rather than process-local counters."""
 
 from datetime import timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 
 from greyqueue.models import Attempt, Event, Job, SystemEvent, Worker
 from greyqueue.service import database_time
 
+# Latency statistics cover a recent window so each poll stays cheap as history grows;
+# totals still derive from all durable events.
+WINDOW = timedelta(hours=1)
 
-def worker_rows(session, limit=200):
+
+def worker_rows(session, limit: int = 200) -> list[dict[str, Any]]:
     active = dict(
         session.execute(
             select(Attempt.worker_id, func.count())
@@ -38,6 +43,7 @@ def snapshot(session, queue_limit: int) -> dict:
     worker_states = dict(
         session.execute(select(Worker.state, func.count()).group_by(Worker.state)).all()
     )
+    since = database_time(session) - WINDOW
     duration = func.extract("epoch", Attempt.finished_at - Attempt.started_at)
     queue_wait = func.extract("epoch", Attempt.created_at - Job.created_at)
     avg, p50, p95, p99 = session.execute(
@@ -46,10 +52,13 @@ def snapshot(session, queue_limit: int) -> dict:
             func.percentile_cont(0.5).within_group(duration),
             func.percentile_cont(0.95).within_group(duration),
             func.percentile_cont(0.99).within_group(duration),
-        ).where(Attempt.started_at.is_not(None), Attempt.finished_at.is_not(None))
+        ).where(Attempt.started_at.is_not(None), Attempt.finished_at >= since)
     ).one()
     wait = session.scalar(
-        select(func.avg(queue_wait)).select_from(Attempt).join(Job, Job.id == Attempt.job_id)
+        select(func.avg(queue_wait))
+        .select_from(Attempt)
+        .join(Job, Job.id == Attempt.job_id)
+        .where(Attempt.finished_at >= since)
     )
     throughput = (
         session.scalar(
@@ -76,6 +85,7 @@ def snapshot(session, queue_limit: int) -> dict:
         "failed": counts.get("FAILED", 0) + counts.get("DEAD_LETTER", 0),
         "retries": counts.get("RETRY_WAIT", 0),
         "throughput_60s": throughput,
+        "latency_window_seconds": int(WINDOW.total_seconds()),
         "duration": {
             "average": float(avg or 0),
             "p50": float(p50 or 0),
@@ -117,15 +127,21 @@ def prometheus(data: dict) -> str:
     for key, value in values.items():
         kind = "counter" if key.endswith("_total") else "gauge"
         lines.extend([f"# TYPE greyqueue_{key} {kind}", f"greyqueue_{key} {value}"])
+    lines.append("# TYPE greyqueue_job_duration_seconds gauge")
     for key, value in data["duration"].items():
         lines.append(f'greyqueue_job_duration_seconds{{statistic="{key}"}} {value}')
+    lines.append("# TYPE greyqueue_workers gauge")
     for state in ("HEALTHY", "SUSPECT", "DEAD", "DRAINING"):
         lines.append(f'greyqueue_workers{{state="{state}"}} {data["worker_states"].get(state, 0)}')
-    for worker in data["workers"]:
-        lines.append(
-            f'greyqueue_worker_utilization{{worker="{worker["id"]}"}} {worker["running"] / worker["capacity"]}'
-        )
-        lines.append(
-            f'greyqueue_worker_heartbeat_age_seconds{{worker="{worker["id"]}"}} {worker["heartbeat_age_seconds"]}'
-        )
+    # Worker IDs match protocol.WORKER_ID, so they are safe as label values. DEAD workers
+    # are counted above but get no per-worker series, which would otherwise grow forever.
+    live = [w for w in data["workers"] if w["state"] != "DEAD"]
+    lines.append("# TYPE greyqueue_worker_utilization gauge")
+    for worker in live:
+        utilization = worker["running"] / worker["capacity"]
+        lines.append(f'greyqueue_worker_utilization{{worker="{worker["id"]}"}} {utilization}')
+    lines.append("# TYPE greyqueue_worker_heartbeat_age_seconds gauge")
+    for worker in live:
+        age = worker["heartbeat_age_seconds"]
+        lines.append(f'greyqueue_worker_heartbeat_age_seconds{{worker="{worker["id"]}"}} {age}')
     return "\n".join(lines) + "\n"

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -22,8 +23,13 @@ def main():
         expect(page.locator("#connection")).to_contain_text("Connected", timeout=30000)
         page.locator("#submit").get_by_role("button", name="Submit job").click()
         expect(page.locator("#jobs")).to_contain_text("SUCCEEDED", timeout=30000)
-        page.get_by_role("button", name="Inspect", exact=True).first.click()
+        page.get_by_role("button", name=re.compile(r"^Inspect job ")).first.click()
         expect(page.locator("#inspect")).to_contain_text("attempts")
+        filters = page.locator("#filter option").all_inner_texts()
+        assert {"LEASED", "CANCELLED", "DEAD_LETTER"} <= set(filters), filters
+        page.select_option("#filter", "CANCELLED")
+        expect(page.locator("#jobs")).to_contain_text("No CANCELLED jobs")
+        page.select_option("#filter", "")
         assert page.evaluate("localStorage.length + sessionStorage.length") == 0
         assert cluster.env["CLIENT_TOKEN"] not in page.content()
         output = ROOT / "docs/results"
@@ -35,6 +41,9 @@ def main():
         assert not errors, errors
         page.get_by_role("button", name="Disconnect", exact=True).click()
         assert page.locator("#connection").inner_text() == "Disconnected"
+        page.wait_for_timeout(2500)  # an in-flight refresh must not flip the status back
+        assert page.locator("#connection").inner_text() == "Disconnected"
+        assert page.locator("#jobs tr").count() == 0 and page.locator("#depth").inner_text() == "—"
         browser.close()
         (output / "dashboard-check.json").write_text(
             json.dumps(
@@ -46,9 +55,11 @@ def main():
                         "submit",
                         "live completion",
                         "inspect attempts",
+                        "complete state filter",
+                        "empty state",
                         "no persisted token",
                         "mobile overflow",
-                        "disconnect",
+                        "disconnect clears panels",
                     ],
                 },
                 indent=2,

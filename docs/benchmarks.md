@@ -10,6 +10,8 @@ The read-path optimization batches result lookup for a page. `python -m scripts.
 
 ## Recorded local results
 
+Recorded at the v1.0 release, before the audit changes to queue indexes and metric windows; re-run to measure the current code.
+
 - 100-job matrix: all 12 strategy/workload cases completed without execution failures or retries.
 - 1,000 mixed jobs, hybrid, 3 workers x 2 slots: 44.29 jobs/s; P95 end-to-end latency 7.714 seconds.
 - 10,000 light jobs, hybrid, 3 workers x 2 slots: 44.99 jobs/s; P95 38.165 seconds; peak queue depth 2,041; zero execution/submission retries and failures.

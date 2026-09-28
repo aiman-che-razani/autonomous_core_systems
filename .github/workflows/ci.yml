@@ -7,7 +7,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:18
+        image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
         env:
           POSTGRES_PASSWORD: ci-only-password
           POSTGRES_USER: greyqueue
@@ -22,8 +22,8 @@ jobs:
       CLIENT_TOKEN: ci-only-client-token
       WORKER_TOKEN: ci-only-worker-token
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - run: pip install uv==0.12.15
@@ -39,7 +39,16 @@ jobs:
       - run: uv run playwright install --with-deps chromium
       - run: uv run python -m scripts.check_dashboard
       - run: docker build -t greyqueue:ci .
-      - uses: actions/upload-artifact@v4
+      # Full Compose stack: migrate, least-privilege db-roles, coordinator, three workers.
+      # configure.py writes .env (POSTGRES/APP_DB passwords); job-level env supplies tokens.
+      - run: python scripts/configure.py
+      - run: docker compose -p greyqueue-ci up -d --build --scale worker=3 --wait --wait-timeout 180
+      - run: uv run python -m scripts.check_compose
+      - if: always()
+        run: docker compose -p greyqueue-ci logs --no-color > docs/results/compose-ci.log 2>&1 || true
+      - if: always()
+        run: docker compose -p greyqueue-ci down -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: validation-evidence

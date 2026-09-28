@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:18
+    # Pinned by digest (multi-arch index for postgres:18, 2026-09-28); bump deliberately.
+    image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
     environment:
       POSTGRES_USER: greyqueue
       POSTGRES_DB: greyqueue
@@ -14,13 +15,43 @@ services:
       retries: 30
   migrate:
     build: .
-    env_file: .env
+    # Needs only the database URL (migrations/env.py); no client or worker tokens.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
     environment:
       DATABASE_URL: postgresql+psycopg://greyqueue:${POSTGRES_PASSWORD}@postgres:5432/greyqueue
     command: ["alembic", "upgrade", "head"]
     depends_on:
       postgres:
         condition: service_healthy
+  db-roles:
+    # Owner-run, idempotent grants for the least-privilege runtime role (docker/db-roles.sql).
+    # Runs on every `up`, so volumes created before this service existed are upgraded too.
+    image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+    user: postgres
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    mem_limit: 128m
+    environment:
+      PGHOST: postgres
+      PGUSER: greyqueue
+      PGDATABASE: greyqueue
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      # Passed as a session setting, so the secret never appears in a process argument list.
+      PGOPTIONS: -c greyqueue.app_password=${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (run python scripts/configure.py)}
+    volumes:
+      - ./docker/db-roles.sql:/db-roles.sql:ro
+    command: ["psql", "-v", "ON_ERROR_STOP=1", "-q", "-f", "/db-roles.sql"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
   coordinator:
     build: .
     init: true
@@ -32,12 +63,24 @@ services:
     mem_limit: 512m
     cpus: 2
     stop_grace_period: 30s
-    env_file: .env
+    # Explicit settings only (no env_file): the coordinator never receives the owner password.
     environment:
-      DATABASE_URL: postgresql+psycopg://greyqueue:${POSTGRES_PASSWORD}@postgres:5432/greyqueue
+      DATABASE_URL: postgresql+psycopg://greyqueue_app:${APP_DB_PASSWORD}@postgres:5432/greyqueue
+      CLIENT_TOKEN: ${CLIENT_TOKEN:?Set CLIENT_TOKEN in .env}
+      WORKER_TOKEN: ${WORKER_TOKEN:?Set WORKER_TOKEN in .env}
+      SCHEDULER: ${SCHEDULER:-priority}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-2}
+      SUSPECT_AFTER: ${SUSPECT_AFTER:-6}
+      DEAD_AFTER: ${DEAD_AFTER:-12}
+      LEASE_SECONDS: ${LEASE_SECONDS:-10}
+      MAINTENANCE_INTERVAL: ${MAINTENANCE_INTERVAL:-0.5}
+      QUEUE_LIMIT: ${QUEUE_LIMIT:-10000}
+      SUBMISSIONS_PER_MINUTE: ${SUBMISSIONS_PER_MINUTE:-20000}
+      REQUIRE_TLS: ${REQUIRE_TLS:-false}
+      ALLOWED_HOSTS: '${ALLOWED_HOSTS:-["127.0.0.1","localhost","coordinator"]}'
     ports: ["127.0.0.1:8810:8810"]
     depends_on:
-      migrate:
+      db-roles:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8810/health')"]

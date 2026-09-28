@@ -7,7 +7,10 @@
 | Worker slow past deadline | Timeout; retry budget; dead letter | Executor tests + process experiment |
 | Worker returns after expiry | Old token is fenced | Automated tests |
 | Renewal races recovery | Job lock + expiry recheck prevent invalid ownership | Database tests |
-| Coordinator killed/restarted | Workers retry transport; database recovery continues | Process experiment |
+| Coordinator killed/restarted | Workers retry transport (by design); after restart the job completes on a later attempt | Process experiment (asserts completion, not the retries themselves) |
+| Claim response lost, worker then SUSPECT/DRAINING | Replaying the claim ID returns the same attempt | Database test |
+| Task output the coordinator cannot store | Recorded as a permanent failure; the worker keeps running | Executor unit test + worker-loop test against a mock coordinator (413 and 422) |
+| Worker session revoked (heartbeat 401) | Worker stops its slots and exits with the error | Worker-loop test |
 | PostgreSQL stops temporarily | 503; worker/recovery loops retry; processing resumes | Native outage experiment |
 | Two coordinators claim | Shared locks/indexes keep one active owner | Process experiment |
 | Submit response lost | Same idempotency key returns same job | Concurrent deduplication test |
