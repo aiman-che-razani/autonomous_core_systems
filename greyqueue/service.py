@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from greyqueue.models import Attempt, Event, Job, Result, Worker
 from greyqueue.scheduler import scheduler
+from greyqueue.sql import statuses
 from greyqueue.tasks import validate
 
 TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED", "DEAD_LETTER"}
@@ -43,11 +44,6 @@ class Invalid(ValueError):
     def __init__(self, message: str, field: str):
         super().__init__(message)
         self.field = field
-
-
-def now() -> datetime:
-    # Test/fixture helper only; ownership decisions use database_time().
-    return datetime.now(UTC)
 
 
 def database_time(session: Session) -> datetime:
@@ -116,7 +112,9 @@ def admit(
             return existing, False
     timestamp = database_time(session)
     # IN over the active states uses ix_jobs_status; NOT IN (TERMINAL) scans all history.
-    count = session.scalar(select(func.count()).select_from(Job).where(Job.status.in_(ACTIVE)))
+    count = session.scalar(
+        select(func.count()).select_from(Job).where(Job.status.in_(statuses(ACTIVE)))
+    )
     rate = session.scalar(
         select(func.count())
         .select_from(Job)
@@ -181,7 +179,7 @@ def claim(
     if worker is None:
         raise Missing("Register worker first")
     if slot < 0 or slot >= worker.capacity:
-        raise Conflict("Worker capacity exceeded")
+        raise Invalid("Slot is outside this worker's capacity", "slot")
     # Replays come before the health check: a claim committed while the worker was HEALTHY
     # must be returned even if the response was lost and the worker has since become
     # SUSPECT or DRAINING; otherwise the lease is orphaned and burns a retry.

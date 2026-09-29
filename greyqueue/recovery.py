@@ -10,6 +10,7 @@ from sqlalchemy.orm import aliased
 
 from greyqueue.models import Attempt, Job, SystemEvent, Worker
 from greyqueue.service import database_time, fail_attempt, transition
+from greyqueue.sql import statuses
 
 log = logging.getLogger("greyqueue.recovery")
 
@@ -56,7 +57,10 @@ def recover_jobs(session, limit: int = 100) -> int:
         session.scalars(
             select(Job)
             .where(
-                Job.status.in_(["QUEUED", "RETRY_WAIT"]),
+                # Explicit NOT NULL + literal statuses let ix_jobs_waiting_children serve
+                # this every-tick sweep instead of a scan of the whole waiting queue.
+                Job.depends_on.is_not(None),
+                Job.status.in_(statuses(["QUEUED", "RETRY_WAIT"])),
                 select(parent.id)
                 .where(
                     parent.id == Job.depends_on,

@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid4
 
@@ -7,8 +10,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from greyqueue import service
-from greyqueue.api import create_app
+from greyqueue.api import create_app, unprocessable
 from greyqueue.config import Settings
+from greyqueue.db import make_sessions
 from greyqueue.executors import TASK_ENV, Executor, bounded
 from greyqueue.models import SystemEvent, Worker
 from greyqueue.observability import prometheus
@@ -106,7 +110,9 @@ def test_worker_identity_isolation_and_drain(database):
         response = client.post("/internal/workers/heartbeat", headers=full, json={"worker_id": "w"})
         assert response.json()["state"] == "DRAINING"
         assert client.get("/operations").status_code == 401
-        assert "greyqueue_queue_depth" in client.get("/metrics", headers=client_auth).text
+        metrics = client.get("/metrics", headers=client_auth)
+        assert "greyqueue_queue_depth" in metrics.text
+        assert "version=0.0.4" in metrics.headers["content-type"]
         assert client.get("/dashboard").status_code == 200
         assert client.get("/assets/unknown.js").status_code == 404
         assert client.post("/workers/bad id!/drain", headers=client_auth).status_code == 422
@@ -170,6 +176,10 @@ def test_hostile_inputs_are_client_errors(database):
         response = client.post("/jobs", headers=headers, json=orphan)
         assert response.status_code == 422
         assert response.json()["detail"][0]["loc"] == ["body", "depends_on"]
+        # A lone surrogate escape is valid JSON text but cannot be stored in JSONB.
+        surrogate = '{"task": "sleep", "args": {"seconds": 0.0}, "metadata": {"x": "\\ud800"}}'
+        raw = {**headers, "Content-Type": "application/json"}
+        assert client.post("/jobs", headers=raw, content=surrogate).status_code == 422
         rebound = {**headers, "Host": "attacker.example"}
         assert client.get("/health", headers=rebound).status_code == 400
 
@@ -278,7 +288,7 @@ def test_old_attempt_cannot_overwrite_new_completion(database):
         _, attempt = service.claim(db, "w")
         old = attempt.id
         service.start(db, job_id, "w", old)
-        attempt.expires_at = service.now() - timedelta(seconds=1)
+        attempt.expires_at = service.database_time(db) - timedelta(seconds=1)
     with sessions.begin() as db:
         recover_jobs(db)
     with sessions.begin() as db:
@@ -289,3 +299,125 @@ def test_old_attempt_cannot_overwrite_new_completion(database):
         service.finish(db, job_id, "w", old, {"winner": 1}, None)
     with sessions() as db:
         assert service.serialize(db, service.get_job(db, job_id))["result"] == {"winner": 2}
+
+
+@pytest.mark.integration
+def test_drain_survives_death_and_takeover_rules(database):
+    sessions, url = database
+    config = settings_for(url)
+    auth = {"Authorization": f"Bearer {config.worker_token}"}
+    client_auth = {"Authorization": f"Bearer {config.client_token}"}
+    register = {"worker_id": "d", "session_token": "a" * 40, "capacity": 1}
+    session_a = {**auth, "X-Worker-Session": "a" * 40}
+    with TestClient(create_app(config)) as client:
+        assert (
+            client.post("/internal/workers/register", headers=auth, json=register).status_code
+            == 200
+        )
+        assert client.post("/workers/d/drain", headers=client_auth).json()["state"] == "DRAINING"
+        with sessions.begin() as db:
+            db.get(Worker, "d").state = "DEAD"  # partitioned past DEAD_AFTER
+        beat = client.post(
+            "/internal/workers/heartbeat", headers=session_a, json={"worker_id": "d"}
+        )
+        assert beat.json()["state"] == "DRAINING"  # the drain survived DEAD (ADR 009)
+        # A same-token registration replay revives a DEAD row immediately.
+        with sessions.begin() as db:
+            db.get(Worker, "d").state = "DEAD"
+        assert (
+            client.post("/internal/workers/register", headers=auth, json=register).status_code
+            == 200
+        )
+        with sessions() as db:
+            assert db.get(Worker, "d").state == "DRAINING"
+        # A new session is refused unless the ID is DEAD; a takeover starts clean.
+        takeover = {**register, "session_token": "b" * 40, "capacity": 2}
+        for state in ("SUSPECT", "DRAINING"):
+            with sessions.begin() as db:
+                db.get(Worker, "d").state = state
+            refused = client.post("/internal/workers/register", headers=auth, json=takeover)
+            assert refused.status_code == 409, state
+        with sessions.begin() as db:
+            db.get(Worker, "d").state = "DEAD"
+        assert (
+            client.post("/internal/workers/register", headers=auth, json=takeover).status_code
+            == 200
+        )
+        assert client.post("/workers/nobody/drain", headers=client_auth).status_code == 404
+    with sessions() as db:
+        worker = db.get(Worker, "d")
+        assert (worker.capacity, worker.drain_requested, worker.state) == (2, False, "HEALTHY")
+
+
+@pytest.mark.integration
+def test_session_check_waits_for_a_concurrent_takeover(database):
+    # identity() must compare the session under the worker row lock; an unlocked read would
+    # let the old process claim work right after its ID was taken over.
+    sessions, url = database
+    config = settings_for(url)
+    auth = {"Authorization": f"Bearer {config.worker_token}"}
+    old = {**auth, "X-Worker-Session": "a" * 40}
+    body = {"worker_id": "r", "session_token": "a" * 40, "capacity": 1}
+    with TestClient(create_app(config)) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        client.post("/internal/workers/register", headers=auth, json=body)
+        beyond = {"worker_id": "r", "slot": 3, "claim_id": str(uuid4())}
+        assert client.post("/internal/claim", headers=old, json=beyond).status_code == 422
+        claim = {"worker_id": "r", "claim_id": str(uuid4())}
+        with sessions.begin() as db:  # a takeover in flight holds the row lock
+            row = db.scalar(select(Worker).where(Worker.id == "r").with_for_update())
+            row.session_hash = hashlib.sha256(("c" * 40).encode()).hexdigest()
+            db.flush()
+            pending = pool.submit(client.post, "/internal/claim", headers=old, json=claim)
+            time.sleep(0.5)
+            assert not pending.done()  # waiting for the lock, not answered from a stale read
+        assert pending.result(timeout=10).status_code == 401
+
+
+def test_openapi_documents_security_errors_and_models():
+    app = create_app(settings_for("postgresql+psycopg://user:pass@127.0.0.1:1/none"))
+    schema = app.openapi()
+    assert set(schema["components"]["securitySchemes"]) == {
+        "clientToken",
+        "workerToken",
+        "workerSession",
+    }
+    submit = schema["paths"]["/jobs"]["post"]
+    assert {"200", "201", "401", "409", "422", "429", "503"} <= set(submit["responses"])
+    assert "$ref" in str(submit["responses"]["200"]["content"])
+    assert submit["security"] == [{"clientToken": []}]
+    assert "security" not in schema["paths"]["/health"]["get"]
+    claim = schema["paths"]["/internal/claim"]["post"]
+    assert claim["security"] == [{"workerToken": [], "workerSession": []}]
+    parameters = [
+        p["name"].lower()
+        for path in schema["paths"].values()
+        for operation in path.values()
+        for p in operation.get("parameters", [])
+    ]
+    assert "authorization" not in parameters and "x-worker-session" not in parameters
+
+
+def test_unprocessable_shapes():
+    from pydantic import BaseModel, ValidationError
+
+    assert unprocessable(service.Invalid("x", "depends_on")) == [
+        {"type": "value_error", "loc": ["body", "depends_on"], "msg": "x"}
+    ]
+    assert unprocessable(ValueError("y"))[0]["loc"] == ["body"]
+
+    class Args(BaseModel):
+        seconds: float
+
+    with pytest.raises(ValidationError) as failure:
+        Args(seconds="no")
+    assert unprocessable(failure.value)[0]["loc"] == ["body", "args", "seconds"]
+    assert bounded({"output": {"x": {1}}})["retryable"] is False
+
+
+def test_url_options_override_default_timeouts():
+    url = "postgresql+psycopg://user:pass@127.0.0.1:1/none?options=-cstatement_timeout%3D60000"
+    engine, _ = make_sessions(url)
+    options = engine.url.query["options"]
+    # PostgreSQL applies -c options in order, so the operator's value must come last.
+    assert options.index("statement_timeout=10000") < options.index("statement_timeout=60000")
+    engine.dispose()

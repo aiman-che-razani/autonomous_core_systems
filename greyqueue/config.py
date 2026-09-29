@@ -10,6 +10,8 @@ class WorkerSettings(BaseSettings):
     worker_token: str = Field(min_length=16)
     coordinator_url: str = "http://127.0.0.1:8810"
     # Empty generates a fresh ID per process; a fixed ID can re-register only once it is DEAD.
+    # protocol.WORKER_ID, but "*" not "+": empty means generate one. Kept literal to avoid
+    # importing protocol (and the task registry) into settings.
     worker_id: str = Field(default="", max_length=100, pattern=r"^[a-zA-Z0-9_-]*$")
     poll_interval: float = Field(default=0.2, ge=0.05, le=30)
 

@@ -10,12 +10,12 @@ The read-path optimization batches result lookup for a page. `python -m scripts.
 
 ## Recorded local results
 
-Recorded at the v1.0 release, before the audit changes to queue indexes and metric windows; re-run to measure the current code.
+The 10,000-job run and the read-path profile were re-recorded on 2026-09-29, after both audit rounds. The 100-job matrix and the 1,000-job mixed run are still the v1.0 recordings (2026-09-16).
 
 - 100-job matrix: all 12 strategy/workload cases completed without execution failures or retries.
-- 1,000 mixed jobs, hybrid, 3 workers x 2 slots: 44.29 jobs/s; P95 end-to-end latency 7.714 seconds.
-- 10,000 light jobs, hybrid, 3 workers x 2 slots: 44.99 jobs/s; P95 38.165 seconds; peak queue depth 2,041; zero execution/submission retries and failures.
+- 1,000 mixed jobs, hybrid, 3 workers x 2 slots (v1.0): 44.29 jobs/s; P95 end-to-end latency 7.714 seconds.
+- 10,000 light jobs, hybrid, 3 workers x 2 slots (current code): 38.15 jobs/s; P50 25.49 s, P95 41.064 seconds; peak queue depth 1,878; zero execution/submission retries and failures. The v1.0 run of the same workload recorded 44.99 jobs/s, P50 30.68 s, P95 38.165 s and peak 2,041. A controlled comparison showed the difference is run-to-run and machine-state variation, not a regression: three interleaved runs each of v1.0 (647858f), the current code, and the current code with the worker-row session lock reverted gave medians of 28.73, 28.33 and 28.92 jobs/s (execution 67.9, 68.7 and 67.1 ms), within 2% of each other, while single runs of the same code ranged from 27.6 to 34.6 jobs/s. The absolute level differed again from both recordings above, so compare versions only within one interleaved session, never across days.
 - Hardware: Windows 11, 8 physical / 16 logical CPUs, 31.31 GiB RAM; full CPU identifier and timestamps are in each JSON artifact.
-- 100-result page: 101 SQL statements reduced to 2 with identical output. The recorded local timings were about 36.4 ms and 4.8 ms; query count is the stronger reproducible result.
+- 100-result page: 101 SQL statements reduced to 2 with identical output. The latest local timings were about 46.6 ms and 5.8 ms (v1.0: 36.4 ms and 4.8 ms); query count is the stronger reproducible result.
 
 These figures describe different workloads and queue depths. The larger run's higher latency reflects waiting behind queued work; it does not imply a slower individual hash task.

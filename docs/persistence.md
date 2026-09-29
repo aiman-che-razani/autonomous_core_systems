@@ -6,4 +6,12 @@ The v1 migration preserves v0.1 jobs/results, initializes historical attempt cou
 
 WAL records committed changes so PostgreSQL can recover after a crash. Durability depends on PostgreSQL's storage/fsync configuration; GreyQueue does not replace database backups or replication. Compose uses a named data volume. `docker compose down` preserves it; removing that volume destroys the stored history.
 
-Jobs, results, attempts, events, system events and DEAD worker rows have no automatic retention deletion. Event ids are 64-bit, so the tables will not overflow their keys, but long-running installations must choose archival/retention and monitor database growth; this release does not silently erase history.
+Jobs, results, attempts, events, system events and DEAD worker rows have no automatic retention deletion. Event ids are 64-bit, so the tables will not overflow their keys. The runtime role has no DELETE privilege (ADR 008), so any retention job needs a deliberate grant change in `docker/db-roles.sql`. Meanwhile, long-running installations must choose archival/retention and monitor database growth; this release does not silently erase history.
+
+## Migrations that need downtime
+`7d2e9a41c0b8` rewrites `events` (`bigint` ids) under an ACCESS EXCLUSIVE lock and builds indexes inside the same transaction, so its locks are held until it commits. Stop the coordinators before running it; the time grows with history. `b8f1c3a7d952` only adds a column with a constant default and two indexes, and is quick. Both downgrades refuse to lose data they cannot represent.
+
+## Backup and restore (Compose)
+Back up with `docker compose exec -T postgres pg_dump -U greyqueue -Fc greyqueue > greyqueue.dump`; `-T` matters, because a TTY rewrites line endings in the binary dump. To restore into a fresh volume, start only the database (`docker compose up -d --wait postgres`), run `docker compose exec -T postgres pg_restore -U greyqueue -d greyqueue --no-owner --no-privileges < greyqueue.dump`, then `docker compose up -d`: the migration step finds the schema current, and `db-roles` re-creates the `greyqueue_app` role and its grants, which a dump does not contain. Drain workers before backing up. This procedure was exercised end to end locally (100 jobs, schema and grants restored).
+
+`POSTGRES_PASSWORD` is only applied when the volume is first created. Changing it in `.env` for an existing volume makes the migration fail to authenticate; change the role's password inside the database first (`ALTER ROLE greyqueue PASSWORD ...`). `APP_DB_PASSWORD` can be changed freely: the next `up` re-runs `db-roles`, which sets it.

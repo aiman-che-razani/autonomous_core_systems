@@ -5,6 +5,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # a hung Playwright or Compose step must not hold a runner for 6 h
     services:
       postgres:
         image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
@@ -22,11 +23,14 @@ jobs:
       CLIENT_TOKEN: ci-only-client-token
       WORKER_TOKEN: ci-only-worker-token
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - run: pip install uv==0.12.15
+      # setup-uv downloads uv and verifies its checksum (unlike an unhashed pip install).
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.15'
       - run: uv sync --frozen
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -38,17 +42,18 @@ jobs:
       - run: uv run python -m scripts.profile_reads
       - run: uv run playwright install --with-deps chromium
       - run: uv run python -m scripts.check_dashboard
-      - run: docker build -t greyqueue:ci .
       # Full Compose stack: migrate, least-privilege db-roles, coordinator, three workers.
       # configure.py writes .env (POSTGRES/APP_DB passwords); job-level env supplies tokens.
       - run: python scripts/configure.py
       - run: docker compose -p greyqueue-ci up -d --build --scale worker=3 --wait --wait-timeout 180
       - run: uv run python -m scripts.check_compose
+      # The least-privilege role must read and write rows but nothing more (ADR 008).
+      - run: bash scripts/check_roles.sh greyqueue-ci
       - if: always()
         run: docker compose -p greyqueue-ci logs --no-color > docs/results/compose-ci.log 2>&1 || true
       - if: always()
         run: docker compose -p greyqueue-ci down -v
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: validation-evidence

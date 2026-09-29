@@ -3,11 +3,11 @@
     "demo": "distributed_execution",
     "jobs": 100,
     "distribution": {
-      "demo-worker-1": 33,
-      "demo-worker-0": 33,
-      "demo-worker-2": 34
+      "demo-worker-1": 34,
+      "demo-worker-0": 34,
+      "demo-worker-2": 32
     },
-    "seconds": 6.266,
+    "seconds": 4.578,
     "passed": true
   },
   {

@@ -1,6 +1,6 @@
 # Delivery semantics
 
-GreyQueue provides at-least-once execution with bounded retries under eventual recovery of PostgreSQL, coordinators and workers. An accepted job can end in success, permanent failure, cancellation or dead letter. There is no unconditional eventual-success guarantee.
+GreyQueue provides at-least-once delivery attempts with a bounded retry budget under eventual recovery of PostgreSQL, coordinators and workers. Each lease counts as an attempt, so a job whose lease expires before it starts can exhaust its budget (and reach DEAD_LETTER with `max_retries=0`) without ever executing. An accepted job can end in success, permanent failure, cancellation or dead letter. There is no unconditional eventual-success guarantee.
 
 A claim is delivery; the task body is execution; an independent sink commit is effect completion; the HTTP finish response is acknowledgement; the PostgreSQL completion transaction is result persistence. These are different moments. A crash between a sink commit and result persistence creates an ambiguous outcome. Retrying may duplicate the effect.
 

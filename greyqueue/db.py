@@ -14,7 +14,8 @@ def make_sessions(url: str | None = None):
     existing = parsed.query.get("options", "")
     if isinstance(existing, tuple):
         existing = " ".join(existing)
-    parsed = parsed.update_query_dict({"options": f"{existing} {TIMEOUTS}".strip()})
+    # Later -c settings win, so options already in the URL override these defaults.
+    parsed = parsed.update_query_dict({"options": f"{TIMEOUTS} {existing}".strip()})
     engine = create_engine(
         parsed,
         pool_pre_ping=True,

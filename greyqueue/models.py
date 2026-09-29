@@ -30,6 +30,8 @@ class Worker(Base):
         CheckConstraint(
             "state IN ('HEALTHY','SUSPECT','DEAD','DRAINING')", name="workers_state_check"
         ),
+        # detect_workers filters and worker_rows sorts on last_seen; DEAD rows accumulate.
+        Index("ix_workers_last_seen", "last_seen"),
     )
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     state: Mapped[str] = mapped_column(String(24), server_default="HEALTHY")
@@ -38,6 +40,8 @@ class Worker(Base):
         JSONB, server_default='["sleep","calculate_pi","hash_text","flaky"]'
     )
     session_hash: Mapped[str | None] = mapped_column(String(64))
+    # Operator drain intent; survives SUSPECT/DEAD so a returning worker still drains.
+    drain_requested: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     registered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -68,6 +72,12 @@ class Job(Base):
         Index("ix_jobs_created", "created_at"),
         # Trailing-minute throughput in observability.snapshot.
         Index("ix_jobs_succeeded", "updated_at", postgresql_where=text("status = 'SUCCEEDED'")),
+        # Recovery's cancel-children-of-failed-parents sweep, every maintenance tick.
+        Index(
+            "ix_jobs_waiting_children",
+            "depends_on",
+            postgresql_where=text("depends_on IS NOT NULL AND status IN ('QUEUED','RETRY_WAIT')"),
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     priority: Mapped[int] = mapped_column(Integer, server_default="0")

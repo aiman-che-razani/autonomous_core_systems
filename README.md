@@ -18,7 +18,7 @@ A portfolio implementation of a durable queue, scheduler, worker runtime and rec
 | v0.6 | Reproducible CPU/I/O/mixed benchmarks, resource measurements, charts, batched result reads |
 | v1.0 | Worker session isolation, bounded admission, container restrictions, scheduled jobs, dependencies, multiple coordinators |
 
-See [validation](docs/validation.md), [architecture](docs/architecture.md), [failure model](docs/failure-model.md) and [benchmarks](docs/benchmarks.md). This is a tested engineering portfolio release. Operating it as an internet-facing or highly available production service is out of scope; that would need at least environment-specific TLS, database backups/replication, a least-privilege database role and monitoring.
+See [validation](docs/validation.md), [architecture](docs/architecture.md), [failure model](docs/failure-model.md) and [benchmarks](docs/benchmarks.md). This is a tested engineering portfolio release. Operating it as an internet-facing or highly available production service is out of scope; that would need at least environment-specific TLS, database backups/replication, high availability and monitoring. (Compose already runs the coordinator as a least-privilege database role; the native development cluster does not.)
 
 ## Docker quick start
 
@@ -44,7 +44,7 @@ uv run alembic upgrade head
 uv run uvicorn greyqueue.api:create_app --factory --host 127.0.0.1 --port 8810
 ```
 
-Run `uv run greyqueue-worker` in three additional terminals. Each process generates its own worker ID and has two slots by default. (A fixed `WORKER_ID` can only re-register once its previous process has been marked DEAD.) Configure `CAPACITY`, `EXECUTOR` and other settings in `.env` (see [.env.example](.env.example)). The local database helper creates only `.runtime/postgres` on port 55441 and generates credentials on first use; **do not run configure.py before initializing this native cluster**. It refuses to overwrite an existing `.env`. Set POSTGRES_BIN if binaries are elsewhere.
+Run `uv run greyqueue-worker` in three additional terminals. Each process generates its own worker ID and has two slots by default. (A fixed `WORKER_ID` can only re-register once its previous process has been marked DEAD.) Configure `CAPACITY`, `EXECUTOR` and other settings in `.env` (see [.env.example](.env.example)). The local database helper creates only `.runtime/postgres` on port 55441 and writes a `.env` pointing at that cluster's `postgres` database; **do not run configure.py before initializing this native cluster** (the helper refuses to initialize when a `.env` already exists, while configure.py only ever appends missing keys, such as the `APP_DB_PASSWORD` Compose needs). Set POSTGRES_BIN if binaries are elsewhere.
 
 ```powershell
 uv run greyqueue submit calculate_pi --args '{"iterations":100000}' --priority 5 --idempotency-key research-001

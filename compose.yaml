@@ -6,6 +6,7 @@ services:
       POSTGRES_USER: greyqueue
       POSTGRES_DB: greyqueue
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    restart: unless-stopped
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -15,6 +16,7 @@ services:
       retries: 30
   migrate:
     build: .
+    image: greyqueue:local  # one image, built once, shared by migrate/coordinator/worker
     # Needs only the database URL (migrations/env.py); no client or worker tokens.
     read_only: true
     tmpfs: [/tmp]
@@ -48,13 +50,16 @@ services:
       PGOPTIONS: -c greyqueue.app_password=${APP_DB_PASSWORD:?Set APP_DB_PASSWORD in .env (run python scripts/configure.py)}
     volumes:
       - ./docker/db-roles.sql:/db-roles.sql:ro
-    command: ["psql", "-v", "ON_ERROR_STOP=1", "-q", "-f", "/db-roles.sql"]
+    # -1: one transaction, so a running coordinator never sees half-applied grants.
+    command: ["psql", "-1", "-v", "ON_ERROR_STOP=1", "-q", "-f", "/db-roles.sql"]
     depends_on:
       migrate:
         condition: service_completed_successfully
   coordinator:
     build: .
+    image: greyqueue:local
     init: true
+    restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -89,7 +94,9 @@ services:
       retries: 30
   worker:
     build: .
+    image: greyqueue:local
     init: true
+    restart: unless-stopped
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
@@ -103,6 +110,7 @@ services:
       WORKER_TOKEN: ${WORKER_TOKEN:?Set WORKER_TOKEN in .env}
       CAPACITY: ${CAPACITY:-2}
       EXECUTOR: ${EXECUTOR:-subprocess}
+      POLL_INTERVAL: ${POLL_INTERVAL:-0.2}
     command: ["greyqueue-worker"]
     depends_on:
       coordinator:
