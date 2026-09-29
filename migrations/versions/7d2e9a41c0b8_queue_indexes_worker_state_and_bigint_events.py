@@ -1,5 +1,9 @@
 """Queue indexes, worker state constraint and bigint event ids"""
 
+# Operational note: ALTER COLUMN ... TYPE bigint rewrites `events` under an ACCESS
+# EXCLUSIVE lock, and the index builds hold locks until this migration commits. Stop the
+# coordinators (and so the workers' renewals) before upgrading; downtime grows with history.
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -52,7 +56,12 @@ def upgrade():
 def downgrade():
     connection = op.get_bind()
     for table in ("events", "system_events"):
-        if connection.scalar(sa.text(f"SELECT coalesce(max(id), 0) > 2147483647 FROM {table}")):
+        # Rolled-back inserts consume sequence values too, so check last_value as well.
+        too_big = sa.text(
+            f"SELECT coalesce(max(id), 0) > 2147483647 "
+            f"OR (SELECT last_value FROM {table}_id_seq) > 2147483647 FROM {table}"
+        )
+        if connection.scalar(too_big):
             raise RuntimeError(f"{table} ids exceed integer range; cannot downgrade")
         op.execute(f"ALTER SEQUENCE {table}_id_seq AS integer")
         op.alter_column(table, "id", type_=sa.Integer(), existing_type=sa.BigInteger())

@@ -6,6 +6,7 @@ ambiguous timeout creates a second job; pass a stable key when retrying.
 
 import argparse
 import json
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -14,7 +15,7 @@ from greyqueue.config import settings
 from greyqueue.tasks import REGISTRY
 
 
-def json_object(value: str) -> dict:
+def json_object(value: str) -> dict[str, Any]:
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:

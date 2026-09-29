@@ -23,3 +23,6 @@ A claim committed while a worker was HEALTHY is returned on replay even if the w
 
 ## ADR 008: Least-privilege runtime database role
 The coordinator only reads, inserts and updates rows, so in Compose it connects as `greyqueue_app` with exactly those grants; migrations keep the owner role. Grants live in an idempotent owner-run step after each migration rather than a first-boot init script, because init scripts never run on an existing volume. Default privileges extend the grants to tables future migrations create. Tradeoff: a second secret (`APP_DB_PASSWORD`), and the native development cluster keeps using its owner so tests can create disposable schemas.
+
+## ADR 009: Drain intent outlives worker state
+Draining used to be only a state, so recovery's DEAD overwrote it and a returning worker's heartbeat made it HEALTHY again: a drained worker that was partitioned came back and took new work. The operator's intent is now a `drain_requested` flag; heartbeat and a same-token registration replay answer DRAINING while it is set, and a takeover by a new process clears it. Tradeoff: one more column, and a drain can only be undone by a new process taking over the ID.

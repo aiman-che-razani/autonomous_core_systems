@@ -32,7 +32,7 @@ def test_priority_capabilities_capacity_and_fifo(database):
         service.submit(db, "calculate_pi", {"iterations": 10}, priority=99)
         assert service.claim(db, "w", 0, policy="priority")[0].id == high.id
         assert service.claim(db, "w", 1, policy="fifo")[0].id == first.id
-        with pytest.raises(service.Conflict):
+        with pytest.raises(service.Invalid):  # a permanent error, not a retryable 409
             service.claim(db, "w", 2)
 
 
@@ -69,7 +69,7 @@ def test_expiration_recovery_and_fencing(database):
         _, old = service.claim(db, "w")
         old_id = old.id
         service.start(db, job_id, "w", old_id)
-        old.expires_at = service.now() - timedelta(seconds=1)
+        old.expires_at = service.database_time(db) - timedelta(seconds=1)
     with pytest.raises(service.Conflict), sessions.begin() as db:
         service.finish(db, job_id, "w", old_id, {"late": True}, None)
     with sessions.begin() as db:
@@ -123,7 +123,10 @@ def test_schedule_dependency_and_drain(database):
     with sessions.begin() as db:
         worker(db)
         future = service.submit(
-            db, "sleep", {"seconds": 0.0}, scheduled_at=service.now() + timedelta(hours=1)
+            db,
+            "sleep",
+            {"seconds": 0.0},
+            scheduled_at=service.database_time(db) + timedelta(hours=1),
         )
         parent = service.submit(db, "sleep", {"seconds": 0.0})
         child = service.submit(db, "sleep", {"seconds": 0.0}, priority=99, depends_on=parent.id)
@@ -149,11 +152,11 @@ def test_failure_detection_and_illegal_transition(database):
     with sessions.begin() as db:
         worker(db)
         w = db.get(Worker, "w")
-        w.last_seen = service.now() - timedelta(seconds=7)
+        w.last_seen = service.database_time(db) - timedelta(seconds=7)
         db.flush()
         detect_workers(db, 6, 12)
         assert w.state == "SUSPECT"
-        w.last_seen = service.now() - timedelta(seconds=13)
+        w.last_seen = service.database_time(db) - timedelta(seconds=13)
         db.flush()
         detect_workers(db, 6, 12)
         assert w.state == "DEAD"
@@ -215,7 +218,7 @@ def test_expired_unstarted_claim_is_recovered(database):
         job = service.submit(db, "sleep", {"seconds": 0.0}, max_retries=1, retry_delay=0)
         job_id = job.id
         _, attempt = service.claim(db, "w")
-        attempt.expires_at = service.now() - timedelta(seconds=1)
+        attempt.expires_at = service.database_time(db) - timedelta(seconds=1)
     with sessions.begin() as db:
         recover_jobs(db)
     with sessions() as db:
@@ -264,10 +267,35 @@ def test_exponential_delay_and_permanent_failure(database):
         service.finish(db, job.id, "w", attempt.id, None, "transient", True)
         assert 1.9 <= (job.available_at - attempt.finished_at).total_seconds() <= 2.1
         assert service.claim(db, "w") is None
-        job.available_at = service.now() - timedelta(seconds=1)
+        job.available_at = service.database_time(db) - timedelta(seconds=1)
     with sessions.begin() as db:
         job, attempt = service.claim(db, "w")
         service.start(db, job.id, "w", attempt.id)
         service.finish(db, job.id, "w", attempt.id, None, "permanent", False)
     with sessions() as db:
         assert db.get(Job, job_id).status == "FAILED"
+
+
+def test_draining_is_not_demoted_to_suspect_but_can_die(database):
+    sessions, _ = database
+    with sessions.begin() as db:
+        worker(db)
+        w = db.get(Worker, "w")
+        w.state = "DRAINING"
+        w.last_seen = service.database_time(db) - timedelta(seconds=7)
+        db.flush()
+        detect_workers(db, 6, 12)
+        assert w.state == "DRAINING"
+        w.last_seen = service.database_time(db) - timedelta(seconds=13)
+        db.flush()
+        detect_workers(db, 6, 12)
+        assert w.state == "DEAD"
+
+
+def test_dependency_on_a_cancelled_parent_is_a_conflict(database):
+    sessions, _ = database
+    with sessions.begin() as db:
+        parent = service.submit(db, "sleep", {"seconds": 0.0})
+        service.cancel(db, parent.id)
+        with pytest.raises(service.Conflict):
+            service.submit(db, "sleep", {"seconds": 0.0}, depends_on=parent.id)

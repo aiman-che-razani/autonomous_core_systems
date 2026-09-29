@@ -5,10 +5,17 @@ required key it lacks (for example APP_DB_PASSWORD, added with the least-privile
 database role) is appended with a fresh random value.
 """
 
+import os
 import secrets
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def private(path: Path) -> None:
+    """Owner-only permissions: .env holds every secret. (Windows ignores all but read-only.)"""
+    if os.name != "nt":
+        path.chmod(0o600)
 
 
 def main():
@@ -25,6 +32,7 @@ def main():
     }
     if not path.exists():
         path.write_text("".join(f"{k}={v}\n" for k, v in required.items()), encoding="utf-8")
+        private(path)
         print("Created .env with independent random credentials")
         return
     text = path.read_text(encoding="utf-8")
@@ -38,6 +46,7 @@ def main():
     prefix = "" if text.endswith("\n") or not text else "\n"
     with path.open("a", encoding="utf-8") as env:
         env.write(prefix + "".join(f"{k}={required[k]}\n" for k in missing))
+    private(path)
     print("Existing .env preserved; added " + ", ".join(missing))
 
 

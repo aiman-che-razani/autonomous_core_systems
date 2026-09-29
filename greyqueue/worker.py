@@ -50,7 +50,6 @@ async def run(
     if os.name != "nt":
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop.set)
-    executor = Executor(config.executor, config.capacity)
     async with httpx.AsyncClient(
         base_url=config.coordinator_url,
         transport=transport,
@@ -69,6 +68,9 @@ async def run(
         )
         lease_seconds = registration["lease_seconds"]
         heartbeat_interval = registration["heartbeat_interval"]
+        # Created only after registration succeeds, so a refused registration (e.g. a live
+        # ID) never leaves a warmed process pool behind.
+        executor = Executor(config.executor, config.capacity)
         emit("registered", worker_id=worker_id, capacity=config.capacity, executor=config.executor)
 
         async def heartbeat():

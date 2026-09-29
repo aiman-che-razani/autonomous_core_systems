@@ -7,13 +7,17 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 
+from greyqueue.protocol import OUTPUT_LIMIT
 from greyqueue.tasks import RetryableTaskError, execute, message
 
 # Task processes get just enough environment to start Python; never the worker's
 # WORKER_TOKEN or anything else read from .env.
 TASK_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PYTHONPATH", "VIRTUAL_ENV", "LANG")
-OUTPUT_LIMIT = 64000  # protocol.Completion rejects larger output
+# Removed from pool processes' environment. Threads share the worker's environment and
+# cannot be isolated; only the subprocess executor gets a fully minimal one.
+SECRETS = ("WORKER_TOKEN", "CLIENT_TOKEN", "DATABASE_URL", "POSTGRES_PASSWORD", "APP_DB_PASSWORD")
 
 
 _rendezvous_barrier = None
@@ -22,6 +26,8 @@ _rendezvous_barrier = None
 def _bind_barrier(barrier) -> None:
     global _rendezvous_barrier
     _rendezvous_barrier = barrier
+    for key in SECRETS:  # pool initializer: runs once in each spawned process
+        os.environ.pop(key, None)
 
 
 def _rendezvous() -> None:
@@ -36,6 +42,17 @@ def invoke(job: dict) -> dict:
         return {"error": message(exc), "retryable": True}
     except ValueError as exc:
         return {"error": message(exc), "retryable": False}
+
+
+def parse_output(stdout: bytes) -> dict:
+    """A task process's stdout must be one JSON object with output or error."""
+    try:
+        result = json.loads(stdout)
+    except ValueError:
+        return {"error": "Task produced invalid output", "retryable": False}
+    if not isinstance(result, dict) or ("output" in result) == ("error" in result):
+        return {"error": "Task produced invalid output", "retryable": False}
+    return result
 
 
 def bounded(result: dict) -> dict:
@@ -76,7 +93,14 @@ class Executor:
                 warm.result()
 
     async def run(self, job: dict) -> dict:
-        return bounded(await self.dispatch(job))
+        try:
+            return bounded(await self.dispatch(job))
+        except BrokenProcessPool:
+            raise  # the pool is unusable for every later job; let the worker exit
+        except Exception as exc:  # noqa: BLE001 - deliberate: see comment
+            # Anything else is this job's failure, not the worker's: report it so one bad
+            # job cannot crash every worker that retries it.
+            return {"error": f"Executor failed: {message(exc)}", "retryable": True}
 
     async def dispatch(self, job: dict) -> dict:
         if self.strategy == "subprocess":
@@ -120,7 +144,7 @@ class Executor:
                     + stderr.decode(errors="replace")[-1000:],
                     "retryable": True,
                 }
-            return json.loads(stdout)
+            return parse_output(stdout)
         except TimeoutError:
             return {"error": "Task execution timeout", "retryable": True}
         finally:

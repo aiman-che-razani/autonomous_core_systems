@@ -11,6 +11,7 @@ from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import aliased
 
 from greyqueue.models import Job, Worker
+from greyqueue.sql import statuses
 
 
 class Scheduler(Protocol):
@@ -28,7 +29,7 @@ class FIFOScheduler:
         return (
             select(Job)
             .where(
-                Job.status.in_(["QUEUED", "RETRY_WAIT"]),
+                Job.status.in_(statuses(["QUEUED", "RETRY_WAIT"])),
                 Job.available_at <= timestamp,
                 Job.task.in_(worker.capabilities),
                 or_(Job.depends_on.is_(None), ready_parent),

@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 
 from greyqueue.models import Attempt, Event, Job, SystemEvent, Worker
 from greyqueue.service import database_time
+from greyqueue.sql import statuses
 
 # Latency statistics cover a recent window so each poll stays cheap as history grows;
 # totals still derive from all durable events.
@@ -36,14 +37,15 @@ def worker_rows(session, limit: int = 200) -> list[dict[str, Any]]:
     ]
 
 
-def snapshot(session, queue_limit: int) -> dict:
+def snapshot(session, queue_limit: int) -> dict[str, Any]:
     states = dict(session.execute(select(Job.status, func.count()).group_by(Job.status)).all())
     counts = dict(session.execute(select(Event.state, func.count()).group_by(Event.state)).all())
     workers = worker_rows(session)
     worker_states = dict(
         session.execute(select(Worker.state, func.count()).group_by(Worker.state)).all()
     )
-    since = database_time(session) - WINDOW
+    timestamp = database_time(session)
+    since = timestamp - WINDOW
     duration = func.extract("epoch", Attempt.finished_at - Attempt.started_at)
     queue_wait = func.extract("epoch", Attempt.created_at - Job.created_at)
     avg, p50, p95, p99 = session.execute(
@@ -65,8 +67,10 @@ def snapshot(session, queue_limit: int) -> dict:
             select(func.count())
             .select_from(Job)
             .where(
-                Job.status == "SUCCEEDED",
-                Job.updated_at >= func.clock_timestamp() - timedelta(seconds=60),
+                Job.status.in_(statuses(["SUCCEEDED"])),
+                # A bound value, not clock_timestamp(): volatile functions cannot be
+                # index conditions, so ix_jobs_succeeded would never be range-scanned.
+                Job.updated_at >= timestamp - timedelta(seconds=60),
             )
         )
         / 60
@@ -112,7 +116,7 @@ def snapshot(session, queue_limit: int) -> dict:
     }
 
 
-def prometheus(data: dict) -> str:
+def prometheus(data: dict[str, Any]) -> str:
     values = {
         "jobs_submitted_total": data["submitted"],
         "jobs_completed_total": data["completed"],

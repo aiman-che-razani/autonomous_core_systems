@@ -3,9 +3,9 @@
   "jobs": 100,
   "healthy_workers": 3,
   "jobs_per_worker": {
-    "worker-18238c7761ad": 34,
-    "worker-e1609750c3a0": 33,
-    "worker-57c73a864fb4": 33
+    "worker-eca12a0efc61": 34,
+    "worker-b79fb3c3090c": 34,
+    "worker-bc21dce52243": 32
   },
   "checks": [
     "Docker image build",
