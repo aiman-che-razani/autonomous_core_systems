@@ -9,10 +9,11 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi import Path as PathParam
+from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DataError, OperationalError
 from sqlalchemy.exc import TimeoutError as SQLTimeoutError
@@ -22,7 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from greyqueue import service
 from greyqueue.config import Settings, settings
 from greyqueue.db import make_sessions
-from greyqueue.middleware import BoundRequests
+from greyqueue.middleware import REQUEST_LIMIT, BoundRequests
 from greyqueue.models import Attempt, Job, Result, SystemEvent, Worker
 from greyqueue.observability import prometheus, snapshot, worker_rows
 from greyqueue.protocol import (
@@ -34,8 +35,10 @@ from greyqueue.protocol import (
     Claim,
     Completion,
     ErrorOut,
+    HealthOut,
     Identity,
     JobOut,
+    OperationsOut,
     RegisteredOut,
     Registration,
     RenewedOut,
@@ -51,14 +54,32 @@ from greyqueue.recovery import maintain
 log = logging.getLogger("greyqueue.database")
 STATE_FILTER = "^(" + "|".join(STATUSES) + ")?$"
 PROMETHEUS_TEXT = "text/plain; version=0.0.4; charset=utf-8"
+# Raised by the middleware or the database on any documented route.
+COMMON = {
+    400: {
+        "description": "Host header not in ALLOWED_HOSTS",
+        "content": {"text/plain": {"schema": {"type": "string"}}},
+    },
+    408: {"model": ErrorOut, "description": "Request body not received within 10 seconds"},
+    413: {"model": ErrorOut, "description": f"Request body over {REQUEST_LIMIT // 1024} KiB"},
+    426: {"model": ErrorOut, "description": "HTTPS required (REQUIRE_TLS)"},
+    503: {"model": ErrorOut, "description": "Database temporarily unavailable"},
+}
 ERRORS = {
     401: {"model": ErrorOut, "description": "Missing or invalid credentials"},
     404: {"model": ErrorOut, "description": "Unknown job or worker"},
     409: {"model": ErrorOut, "description": "Conflicting state (fenced, owned, not waiting)"},
-    413: {"model": ErrorOut, "description": "Request body over 128 KiB"},
-    429: {"model": ErrorOut, "description": "Admission limit; retry after Retry-After seconds"},
-    503: {"model": ErrorOut, "description": "Database temporarily unavailable"},
+    429: {
+        "model": ErrorOut,
+        "description": "Admission limit reached",
+        "headers": {"Retry-After": {"schema": {"type": "integer"}, "description": "Seconds"}},
+    },
 }
+
+
+def errors(*codes: int) -> dict[int | str, dict[str, Any]]:
+    """The route-specific error responses a route can actually return."""
+    return {code: ERRORS[code] for code in codes}
 
 
 def unprocessable(exc: ValueError) -> list[dict[str, Any]]:
@@ -89,7 +110,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
             await task
             engine.dispose()
 
-    app = FastAPI(title="GreyQueue", version="1.0.0", lifespan=lifespan, responses=ERRORS)
+    app = FastAPI(title="GreyQueue", version="1.0.0", lifespan=lifespan, responses=COMMON)
     # Added first so BoundRequests stays outermost and also logs/labels host rejections.
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts)
     app.add_middleware(BoundRequests, require_tls=config.require_tls)
@@ -134,6 +155,13 @@ def create_app(config: Settings | None = None) -> FastAPI:
             raise HTTPException(401, "Invalid worker session")
         return record
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc):
+        # type/loc/msg only. The default also echoes `input`, which cannot be encoded when it
+        # holds a NaN literal (json.loads accepts one), turning the 422 into a 500.
+        detail = [{"type": e["type"], "loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()]
+        return JSONResponse({"detail": detail}, status_code=422)
+
     @app.exception_handler(service.Conflict)
     async def conflict(request: Request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=409)
@@ -165,7 +193,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
         detail = [{"type": "value_error", "loc": ["request"], "msg": "Value cannot be stored"}]
         return JSONResponse({"detail": detail}, status_code=422)
 
-    @app.get("/health")
+    @app.get("/health", response_model=HealthOut)
     def health(db: DB):
         db.execute(text("SELECT 1"))
         return {"status": "ok", "version": "1.0.0"}
@@ -179,7 +207,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
             200: {
                 "model": JobOut,
                 "description": "Idempotent replay: the job already admitted for this key",
-            }
+            },
+            **errors(401, 409, 429),
         },
     )
     def submit(body: Submit, db: DB, response: Response):
@@ -196,7 +225,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
             response.status_code = 200
         return service.serialize(db, job)
 
-    @app.get("/jobs", response_model=list[JobOut], dependencies=[Depends(client)])
+    @app.get(
+        "/jobs", response_model=list[JobOut], dependencies=[Depends(client)], responses=errors(401)
+    )
     def jobs(
         db: DB,
         limit: int = Query(50, ge=1, le=200),
@@ -213,12 +244,20 @@ def create_app(config: Settings | None = None) -> FastAPI:
         }
         return [service.serialize(db, job, results) for job in rows]
 
-    @app.get("/jobs/{job_id}", response_model=JobOut, dependencies=[Depends(client)])
+    @app.get(
+        "/jobs/{job_id}",
+        response_model=JobOut,
+        dependencies=[Depends(client)],
+        responses=errors(401, 404),
+    )
     def job(job_id: UUID, db: DB):
         return service.serialize(db, service.get_job(db, job_id))
 
     @app.get(
-        "/jobs/{job_id}/attempts", response_model=list[AttemptOut], dependencies=[Depends(client)]
+        "/jobs/{job_id}/attempts",
+        response_model=list[AttemptOut],
+        dependencies=[Depends(client)],
+        responses=errors(401, 404),
     )
     def attempts(job_id: UUID, db: DB):
         service.get_job(db, job_id)
@@ -240,16 +279,31 @@ def create_app(config: Settings | None = None) -> FastAPI:
             )
         ]
 
-    @app.delete("/jobs/{job_id}", response_model=StatusOut, dependencies=[Depends(client)])
+    @app.delete(
+        "/jobs/{job_id}",
+        response_model=StatusOut,
+        dependencies=[Depends(client)],
+        responses=errors(401, 404, 409),
+    )
     def cancel(job_id: UUID, db: DB):
         service.cancel(db, job_id)
         return {"status": "CANCELLED"}
 
-    @app.get("/workers", response_model=list[WorkerOut], dependencies=[Depends(client)])
+    @app.get(
+        "/workers",
+        response_model=list[WorkerOut],
+        dependencies=[Depends(client)],
+        responses=errors(401),
+    )
     def workers(db: DB, limit: int = Query(200, ge=1, le=200)):
         return worker_rows(db, limit)
 
-    @app.post("/workers/{worker_id}/drain", response_model=StateOut, dependencies=[Depends(client)])
+    @app.post(
+        "/workers/{worker_id}/drain",
+        response_model=StateOut,
+        dependencies=[Depends(client)],
+        responses=errors(401, 404),
+    )
     def drain(worker_id: WorkerPath, db: DB):
         record = db.scalar(
             select(Worker)
@@ -259,18 +313,21 @@ def create_app(config: Settings | None = None) -> FastAPI:
         )
         if record is None:
             raise service.Missing("Worker not found")
-        if record.state == "DEAD":
-            raise service.Conflict("Worker is dead; there is nothing to drain")
-        if record.state != "DRAINING":
-            record.state = "DRAINING"
-            db.add(SystemEvent(kind="worker_draining", worker_id=worker_id))
         # Kept apart from state: SUSPECT/DEAD overwrite state, but a worker that comes back
-        # must still be told to drain (ADR 009).
-        record.drain_requested = True
+        # with the same session must still be told to drain (ADR 009). A DEAD worker keeps
+        # its state and only records the intent; a new process taking over the ID clears it.
+        if record.state != "DEAD":
+            record.state = "DRAINING"
+        if not record.drain_requested:
+            record.drain_requested = True
+            db.add(SystemEvent(kind="worker_draining", worker_id=worker_id))
         return {"state": record.state}
 
     @app.post(
-        "/internal/workers/register", response_model=RegisteredOut, dependencies=[Depends(worker)]
+        "/internal/workers/register",
+        response_model=RegisteredOut,
+        dependencies=[Depends(worker)],
+        responses=errors(401, 409),
     )
     def register(body: Registration, db: DB):
         digest = hashlib.sha256(body.session_token.encode()).hexdigest()
@@ -281,6 +338,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
                 capacity=body.capacity,
                 capabilities=body.capabilities,
                 session_hash=digest,
+                # Statement time; the column default now() is transaction start.
+                registered_at=func.clock_timestamp(),
+                last_seen=func.clock_timestamp(),
             )
             .on_conflict_do_nothing()
             .returning(Worker.id)
@@ -317,7 +377,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
         }
 
     @app.post(
-        "/internal/workers/heartbeat", response_model=StateOut, dependencies=[Depends(worker)]
+        "/internal/workers/heartbeat",
+        response_model=StateOut,
+        dependencies=[Depends(worker)],
+        responses=errors(401),
     )
     def heartbeat(body: Identity, db: DB, credential: SessionHeader = None):
         record = identity(db, body.worker_id, credential)  # row is locked
@@ -328,7 +391,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
         return {"state": record.state}
 
     @app.post(
-        "/internal/claim", response_model=AssignmentOut | None, dependencies=[Depends(worker)]
+        "/internal/claim",
+        response_model=AssignmentOut | None,
+        dependencies=[Depends(worker)],
+        responses=errors(401, 404, 409),
     )
     def claim(body: Claim, db: DB, credential: SessionHeader = None):
         identity(db, body.worker_id, credential)
@@ -349,7 +415,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
         }
 
     @app.post(
-        "/internal/jobs/{job_id}/start", response_model=StatusOut, dependencies=[Depends(worker)]
+        "/internal/jobs/{job_id}/start",
+        response_model=StatusOut,
+        dependencies=[Depends(worker)],
+        responses=errors(401, 404, 409),
     )
     def start(job_id: UUID, body: Assignment, db: DB, credential: SessionHeader = None):
         identity(db, body.worker_id, credential)
@@ -357,7 +426,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
         return {"status": "RUNNING"}
 
     @app.post(
-        "/internal/jobs/{job_id}/renew", response_model=RenewedOut, dependencies=[Depends(worker)]
+        "/internal/jobs/{job_id}/renew",
+        response_model=RenewedOut,
+        dependencies=[Depends(worker)],
+        responses=errors(401, 404, 409),
     )
     def renew(job_id: UUID, body: Assignment, db: DB, credential: SessionHeader = None):
         identity(db, body.worker_id, credential)
@@ -368,7 +440,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
         }
 
     @app.post(
-        "/internal/jobs/{job_id}/finish", response_model=StatusOut, dependencies=[Depends(worker)]
+        "/internal/jobs/{job_id}/finish",
+        response_model=StatusOut,
+        dependencies=[Depends(worker)],
+        responses=errors(401, 404, 409),
     )
     def finish(job_id: UUID, body: Completion, db: DB, credential: SessionHeader = None):
         identity(db, body.worker_id, credential)
@@ -377,11 +452,21 @@ def create_app(config: Settings | None = None) -> FastAPI:
         )
         return {"status": "RECORDED"}
 
-    @app.get("/operations", dependencies=[Depends(client)])
+    @app.get(
+        "/operations",
+        response_model=OperationsOut,
+        dependencies=[Depends(client)],
+        responses=errors(401),
+    )
     def operations(db: DB):
         return snapshot(db, config.queue_limit)
 
-    @app.get("/metrics", response_class=PlainTextResponse, dependencies=[Depends(client)])
+    @app.get(
+        "/metrics",
+        response_class=PlainTextResponse,
+        dependencies=[Depends(client)],
+        responses=errors(401),
+    )
     def metrics(db: DB):
         text_format = prometheus(snapshot(db, config.queue_limit))
         return PlainTextResponse(text_format, media_type=PROMETHEUS_TEXT)
@@ -397,7 +482,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
         return FileResponse(Path(__file__).parent / "dashboard" / name)
 
     def openapi():
-        # Declare the three credentials as security schemes, applied per route family.
+        # The auth headers are hidden params (include_in_schema=False); declaring them as
+        # security schemes lets client generators still send them.
         if app.openapi_schema:
             return app.openapi_schema
         schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
@@ -417,6 +503,17 @@ def create_app(config: Settings | None = None) -> FastAPI:
                 security = [{"clientToken": []}]
             for operation in operations.values():
                 operation["security"] = security
+                # Hidden headers are still validated, so FastAPI documents a 422 that no
+                # request to a route without parameters or a body can trigger.
+                if not operation.get("parameters") and "requestBody" not in operation:
+                    operation["responses"].pop("422", None)
+        # response_class=PlainTextResponse labels every /metrics response text/plain, but its
+        # errors are JSON like everywhere else.
+        for code, response in schema["paths"]["/metrics"]["get"]["responses"].items():
+            if code not in {"200", "400"} and "text/plain" in response.get("content", {}):
+                response["content"] = {
+                    "application/json": {"schema": {"$ref": "#/components/schemas/ErrorOut"}}
+                }
         app.openapi_schema = schema
         return schema
 

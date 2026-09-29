@@ -1,6 +1,6 @@
 {
   "environment": {
-    "timestamp": "2026-09-16T11:34:16.982067+00:00",
+    "timestamp": "2026-09-29T14:12:34.980578+00:00",
     "python": "3.12.14",
     "platform": "Windows-11-10.0.26200-SP0",
     "cpu": "AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD",
@@ -17,23 +17,23 @@
   "results": [
     {
       "jobs": 1000,
-      "elapsed_seconds": 22.577999999999975,
-      "jobs_per_second": 44.29090264859603,
+      "elapsed_seconds": 31.48399999999674,
+      "jobs_per_second": 31.7621649091635,
       "latency_seconds": {
-        "average": 5.301829999,
-        "p50": 6.2559640000000005,
-        "p95": 7.7139785,
-        "p99": 7.80823239
+        "average": 6.507753587,
+        "p50": 7.600289,
+        "p95": 9.8649017,
+        "p99": 10.00037728
       },
-      "average_queue_wait_seconds": 5.191894605,
-      "average_execution_seconds": 0.069045811,
-      "peak_queue_depth": 447,
-      "average_cpu_percent": 211.57874999999999,
-      "peak_rss_mb": 520.12109375,
-      "average_worker_utilization": 0.6854166666666667,
+      "average_queue_wait_seconds": 6.353484532,
+      "average_execution_seconds": 0.091014735,
+      "peak_queue_depth": 417,
+      "average_cpu_percent": 207.52315789473684,
+      "peak_rss_mb": 518.00390625,
+      "average_worker_utilization": 0.7105263157894738,
       "failures": 0,
       "retries": 0,
-      "samples": 80,
+      "samples": 95,
       "submission_retries": 0,
       "strategy": "hybrid",
       "workload": "mixed",

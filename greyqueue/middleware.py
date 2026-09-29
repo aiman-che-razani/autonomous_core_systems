@@ -7,6 +7,7 @@ import uuid
 from starlette.responses import JSONResponse
 
 log = logging.getLogger("greyqueue.requests")
+REQUEST_LIMIT = 131072  # bytes of request body; protocol.TEXT_LIMIT relies on it
 
 
 class BoundRequests:
@@ -28,7 +29,7 @@ class BoundRequests:
                     if message["type"] == "http.disconnect":
                         return
                     total += len(message.get("body", b""))
-                    if total > 131072:
+                    if total > REQUEST_LIMIT:
                         return await JSONResponse({"detail": "Request too large"}, 413)(
                             scope, receive, send
                         )

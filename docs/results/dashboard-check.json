@@ -11,6 +11,9 @@
     "empty state",
     "no persisted token",
     "mobile overflow",
+    "delivery wording",
+    "keyboard-reachable panels",
+    "drain notice and button",
     "disconnect clears panels",
     "rejected token disconnects"
   ]

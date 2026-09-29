@@ -5,8 +5,14 @@ services:
     environment:
       POSTGRES_USER: greyqueue
       POSTGRES_DB: greyqueue
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (run python scripts/configure.py)}
     restart: unless-stopped
+    # The entrypoint drops from root to `postgres` with gosu (a setuid call, not a setuid
+    # binary), so no-new-privileges still lets it start.
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 1g
+    networks: [backend]
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -24,6 +30,7 @@ services:
     security_opt: [no-new-privileges:true]
     pids_limit: 64
     mem_limit: 256m
+    networks: [backend]
     environment:
       DATABASE_URL: postgresql+psycopg://greyqueue:${POSTGRES_PASSWORD}@postgres:5432/greyqueue
     command: ["alembic", "upgrade", "head"]
@@ -41,6 +48,7 @@ services:
     security_opt: [no-new-privileges:true]
     pids_limit: 32
     mem_limit: 128m
+    networks: [backend]
     environment:
       PGHOST: postgres
       PGUSER: greyqueue
@@ -68,6 +76,8 @@ services:
     mem_limit: 512m
     cpus: 2
     stop_grace_period: 30s
+    # The only service on both networks: workers reach the API but never the database.
+    networks: [backend, frontend]
     # Explicit settings only (no env_file): the coordinator never receives the owner password.
     environment:
       DATABASE_URL: postgresql+psycopg://greyqueue_app:${APP_DB_PASSWORD}@postgres:5432/greyqueue
@@ -105,7 +115,13 @@ services:
     mem_limit: 768m
     cpus: 2
     stop_grace_period: 40s
+    # Three by default, so a later plain `docker compose up -d` keeps the same size.
+    deploy:
+      replicas: ${WORKER_REPLICAS:-3}
+    networks: [frontend]
     environment:
+      # Plain HTTP inside the Compose network. REQUIRE_TLS=true answers it with 426, which the
+      # worker treats as fatal: enable that only behind a TLS proxy the workers also use.
       COORDINATOR_URL: http://coordinator:8810
       WORKER_TOKEN: ${WORKER_TOKEN:?Set WORKER_TOKEN in .env}
       CAPACITY: ${CAPACITY:-2}
@@ -115,6 +131,12 @@ services:
     depends_on:
       coordinator:
         condition: service_healthy
+
+networks:
+  # No route out: the database, the migration/role steps and the coordinator only.
+  backend:
+    internal: true
+  frontend:
 
 volumes:
   postgres_data:

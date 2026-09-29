@@ -3,7 +3,7 @@
 | Operation | Locks and atomic work |
 | --- | --- |
 | Submit | Admission advisory lock; compare idempotency digest; count active jobs (indexed) and the rolling-minute rate; check the dependency parent exists and has not failed; insert job and two events |
-| Claim | Worker row (the session is checked under this lock); slot check (a slot beyond capacity is 422); replay an existing claim ID or occupied slot (before the health check); if HEALTHY, walk the queue-head index, filtering availability/capability/dependency, and lock the first eligible job with SKIP LOCKED; create attempt; increment fence; set LEASED |
+| Claim | Worker row (the session is checked under this lock); slot check (a slot beyond capacity is 422); replay an existing, unfinished claim ID (before the health check; an occupied slot under a different claim ID is 409); if HEALTHY, walk the queue-head index, filtering availability/capability/dependency, and lock the first eligible job with SKIP LOCKED; create attempt; increment fence; set LEASED |
 | Start/renew/finish | Worker row (session check), then job row; verify token, worker, fence and expiry; renew also requires a started attempt; mutate attempt/job/result/events together |
 | Recovery | Advisory transaction mutex; lock expired jobs with SKIP LOCKED; recheck expiry; record retry/dead letter; cancel waiting children of failed, dead-lettered or cancelled parents |
 | Drain/heartbeat/register | Worker row; refresh cached ORM state after lock acquisition; drain intent is a separate flag |

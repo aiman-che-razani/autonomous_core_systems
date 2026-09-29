@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from greyqueue.config import WorkerSettings
-from greyqueue.executors import Executor, _bind_barrier, parse_output
+from greyqueue.executors import SECRETS, Executor, _bind_barrier, parse_output
 from greyqueue.worker import run
 
 
@@ -113,26 +113,72 @@ def test_unexpected_executor_error_is_reported_not_fatal(monkeypatch):
 
 
 def test_invalid_task_output_is_a_permanent_failure():
-    for stdout in (b"not json", b"[1]", b'{"output": {}, "error": "x"}', b"{}"):
-        assert parse_output(stdout)["retryable"] is False, stdout
+    invalid = (
+        b"not json",
+        b"[1]",
+        b'{"output": {}, "error": "x"}',
+        b"{}",
+        b'{"output": [1]}',
+        b'{"error": ""}',
+        b'{"error": "x", "retryable": "yes"}',
+        # Extra keys could override the finish request's ownership fields.
+        b'{"output": {}, "worker_id": "someone-else"}',
+        b'{"error": "x", "token": "00000000-0000-0000-0000-000000000000"}',
+    )
+    for stdout in invalid:
+        assert parse_output(stdout) == {"error": "Task produced invalid output", "retryable": False}
     assert parse_output(b'{"output": {"ok": true}}') == {"output": {"ok": True}}
+    assert parse_output(b'{"error": "x"}') == {"error": "x", "retryable": False}
 
 
 def test_pool_processes_drop_secrets(monkeypatch):
-    monkeypatch.setenv("WORKER_TOKEN", "worker-secret-value")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://secret")
+    for key in SECRETS:  # monkeypatch restores every one afterwards
+        monkeypatch.setenv(key, "secret-value")
     _bind_barrier(None)  # the pool initializer, run here in-process
-    assert "WORKER_TOKEN" not in os.environ and "DATABASE_URL" not in os.environ
+    assert not set(SECRETS) & set(os.environ)
 
 
-def test_subprocess_timeout_kills_the_task():
-    # Long enough that the timeout fires after the child has started, so this proves the
-    # kill rather than a slow spawn.
+def test_subprocess_timeout_kills_the_task(monkeypatch):
+    # The timeout starts once the child reports ready (start-up is not the task's time), and
+    # the child must be killed and reaped, not just abandoned when wait_for gives up.
+    spawned = []
+    real = asyncio.create_subprocess_exec
+
+    async def spy(*args, **kwargs):
+        process = await real(*args, **kwargs)
+        spawned.append((process, time.monotonic()))
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spy)
+
     async def scenario():
         executor = Executor("subprocess", 1)
-        started = time.monotonic()
-        result = await executor.run({"task": "sleep", "args": {"seconds": 4.0}, "timeout": 1.5})
-        return result, time.monotonic() - started
+        result = await executor.run({"task": "sleep", "args": {"seconds": 5.0}, "timeout": 1.0})
+        return result, time.monotonic()
 
-    result, elapsed = asyncio.run(scenario())
-    assert "timeout" in result["error"].lower() and elapsed < 3.5
+    result, finished = asyncio.run(scenario())
+    ((process, started),) = spawned
+    assert "timeout" in result["error"].lower()
+    assert process.returncode not in (None, 0)  # killed and reaped; a finished sleep exits 0
+    assert finished - started < 30  # a hang guard only; the return code is the proof
+
+
+def test_a_broken_process_pool_fails_its_job_and_is_replaced():
+    # A task that kills its pool process (segfault, OOM, os._exit) used to stop the worker,
+    # and then the next worker that retried the job.
+    async def scenario():
+        executor = Executor("process", 1)
+        try:
+            broken = executor.pool
+            for process in list(broken._processes.values()):
+                process.kill()
+                process.join()
+            job = {"task": "hash_text", "args": {"text": "abc"}, "timeout": 10}
+            result = await executor.run(job)
+            assert result["retryable"] is True and "pool was restarted" in result["error"]
+            assert executor.pool is not broken
+            assert len((await executor.run(job))["output"]["sha256"]) == 64
+        finally:
+            await executor.close()
+
+    asyncio.run(scenario())

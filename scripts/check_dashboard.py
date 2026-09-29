@@ -46,6 +46,10 @@ def main():
         page.select_option("#filter", "CANCELLED")
         expect(page.locator("#jobs")).to_contain_text("No CANCELLED jobs")
         page.select_option("#filter", "")
+        footer = page.locator("footer").inner_text()
+        assert "delivery attempts" in footer and "execution" not in footer, footer
+        for region in ("#inspect", ".events"):  # scrollable panels are reachable by keyboard
+            assert page.locator(region).get_attribute("tabindex") == "0", region
         assert page.evaluate("localStorage.length + sessionStorage.length") == 0
         assert cluster.env["CLIENT_TOKEN"] not in page.content()
         output = ROOT / "docs/results"
@@ -57,6 +61,10 @@ def main():
         if record:
             page.screenshot(path=str(output / "dashboard-mobile.png"), full_page=True)
         assert not errors, errors
+        # Draining: the notice matches the answered state and the row loses its Drain button.
+        page.get_by_role("button", name="Drain worker dashboard-worker").click()
+        expect(page.locator("#notice")).to_contain_text("stop claiming")
+        expect(page.get_by_role("button", name="Drain worker dashboard-worker")).to_have_count(0)
         page.get_by_role("button", name="Disconnect", exact=True).click()
         assert page.locator("#connection").inner_text() == "Disconnected"
         page.wait_for_timeout(2500)  # an in-flight refresh must not flip the status back
@@ -87,6 +95,9 @@ def main():
                         "empty state",
                         "no persisted token",
                         "mobile overflow",
+                        "delivery wording",
+                        "keyboard-reachable panels",
+                        "drain notice and button",
                         "disconnect clears panels",
                         "rejected token disconnects",
                     ],

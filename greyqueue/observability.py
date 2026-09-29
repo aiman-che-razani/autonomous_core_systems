@@ -9,8 +9,10 @@ from greyqueue.models import Attempt, Event, Job, SystemEvent, Worker
 from greyqueue.service import database_time
 from greyqueue.sql import statuses
 
-# Latency statistics cover a recent window so each poll stays cheap as history grows;
-# totals still derive from all durable events.
+# Latency statistics cover a recent window so each poll stays cheap as history grows.
+# Totals come from jobs.status (terminal states never change, so they only grow) plus the
+# retry events, which ix_events_retries counts without reading the rest of `events`.
+# Both still grow with history; retention is out of scope.
 WINDOW = timedelta(hours=1)
 
 
@@ -32,6 +34,7 @@ def worker_rows(session, limit: int = 200) -> list[dict[str, Any]]:
             "capabilities": w.capabilities,
             "last_seen": w.last_seen.isoformat(),
             "heartbeat_age_seconds": max(0, (timestamp - w.last_seen).total_seconds()),
+            "drain_requested": w.drain_requested,
         }
         for w in session.scalars(select(Worker).order_by(Worker.last_seen.desc()).limit(limit))
     ]
@@ -39,7 +42,9 @@ def worker_rows(session, limit: int = 200) -> list[dict[str, Any]]:
 
 def snapshot(session, queue_limit: int) -> dict[str, Any]:
     states = dict(session.execute(select(Job.status, func.count()).group_by(Job.status)).all())
-    counts = dict(session.execute(select(Event.state, func.count()).group_by(Event.state)).all())
+    retries = session.scalar(
+        select(func.count()).select_from(Event).where(Event.state.in_(statuses(["RETRY_WAIT"])))
+    )
     workers = worker_rows(session)
     worker_states = dict(
         session.execute(select(Worker.state, func.count()).group_by(Worker.state)).all()
@@ -84,10 +89,12 @@ def snapshot(session, queue_limit: int) -> dict[str, Any]:
         "admitted_active": active,
         "queue_limit": queue_limit,
         "saturation": active / queue_limit,
-        "submitted": counts.get("SUBMITTED", 0),
-        "completed": counts.get("SUCCEEDED", 0),
-        "failed": counts.get("FAILED", 0) + counts.get("DEAD_LETTER", 0),
-        "retries": counts.get("RETRY_WAIT", 0),
+        # Every admitted job is one row, and SUCCEEDED/FAILED/DEAD_LETTER are terminal, so
+        # these equal the SUBMITTED/SUCCEEDED/FAILED+DEAD_LETTER event counts.
+        "submitted": sum(states.values()),
+        "completed": states.get("SUCCEEDED", 0),
+        "failed": states.get("FAILED", 0) + states.get("DEAD_LETTER", 0),
+        "retries": retries,
         "throughput_60s": throughput,
         "latency_window_seconds": int(WINDOW.total_seconds()),
         "duration": {

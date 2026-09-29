@@ -82,7 +82,9 @@ def detect_workers(session, suspect_after: float, dead_after: float) -> None:
     workers = session.scalars(
         select(Worker)
         .where(
-            Worker.state != "DEAD", Worker.last_seen < timestamp - timedelta(seconds=suspect_after)
+            # Literal live states let generic plans use ix_workers_live_last_seen.
+            Worker.state.in_(statuses(["HEALTHY", "SUSPECT", "DRAINING"])),
+            Worker.last_seen < timestamp - timedelta(seconds=suspect_after),
         )
         .with_for_update(skip_locked=True)
     )

@@ -69,6 +69,9 @@ def execute(task: str, args: dict[str, Any], attempt: int = 1) -> dict[str, Any]
 
 
 if __name__ == "__main__":
+    # Ready: the executor starts the timeout clock on this line (executors.subprocess).
+    sys.stdout.write("\n")
+    sys.stdout.flush()
     request = json.load(sys.stdin)
     try:
         result = {

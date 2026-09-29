@@ -19,11 +19,15 @@ def main():
         timeout=15,
         headers={"Authorization": f"Bearer {config.client_token}"},
     ) as client:
+
+        def get(path):
+            response = client.get(path)
+            response.raise_for_status()  # a 401/503 must fail loudly, not as a KeyError
+            return response
+
         deadline = time.monotonic() + 60
         while True:
-            response = client.get("/workers")
-            response.raise_for_status()
-            workers = [w for w in response.json() if w["state"] == "HEALTHY"]
+            workers = [w for w in get("/workers").json() if w["state"] == "HEALTHY"]
             if len(workers) == 3:
                 break
             if time.monotonic() > deadline:
@@ -44,7 +48,7 @@ def main():
             ids.append(response.json()["id"])
         deadline = time.monotonic() + 120
         while True:
-            jobs = [client.get(f"/jobs/{job}").json() for job in ids]
+            jobs = [get(f"/jobs/{job}").json() for job in ids]
             if all(job["status"] == "SUCCEEDED" for job in jobs):
                 break
             if time.monotonic() > deadline:
@@ -52,13 +56,13 @@ def main():
             time.sleep(0.5)
         distribution = {}
         for job in ids:
-            attempts = client.get(f"/jobs/{job}/attempts").json()
+            attempts = get(f"/jobs/{job}/attempts").json()
             assert len(attempts) == 1
             worker = attempts[0]["worker_id"]
             distribution[worker] = distribution.get(worker, 0) + 1
         assert len(distribution) == 3
-        assert client.get("/dashboard").status_code == 200
-        assert "greyqueue_jobs_completed_total" in client.get("/metrics").text
+        get("/dashboard")
+        assert "greyqueue_jobs_completed_total" in get("/metrics").text
         report = {
             "passed": True,
             "jobs": 100,

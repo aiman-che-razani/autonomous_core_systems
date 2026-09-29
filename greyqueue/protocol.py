@@ -30,7 +30,16 @@ def storable(value: Any, limit: int, label: str) -> str:
         raise ValueError(f"{label} too large")
     if "\\u0000" in encoded:
         raise ValueError(f"{label} must not contain NUL characters")
+    encodable(value, label)
     return encoded
+
+
+def encodable(value: Any, label: str) -> None:
+    """Lone surrogates survive JSON parsing but make psycopg raise (a 500), not a 422."""
+    try:
+        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError(f"{label} must be valid UTF-8 text") from None
 
 
 class Submit(BaseModel):
@@ -70,6 +79,7 @@ class Registration(Identity):
     def known_capabilities(self) -> "Registration":
         if not self.capabilities or not set(self.capabilities) <= REGISTRY.keys():
             raise ValueError("Unknown or empty task capabilities")
+        encodable(self.session_token, "Session token")
         return self
 
 
@@ -123,6 +133,8 @@ class WorkerOut(BaseModel):
     capabilities: list[str]
     last_seen: str
     heartbeat_age_seconds: float
+    # Operator drain intent; stays set while the worker is SUSPECT or DEAD (ADR 009).
+    drain_requested: bool
 
 
 class AssignmentOut(BaseModel):
@@ -152,6 +164,56 @@ class StatusOut(BaseModel):
 
 class ErrorOut(BaseModel):
     detail: str
+
+
+class HealthOut(BaseModel):
+    status: str
+    version: str
+
+
+class DurationOut(BaseModel):
+    average: float
+    p50: float
+    p95: float
+    p99: float
+
+
+class SystemEventOut(BaseModel):
+    id: int
+    kind: str
+    worker_id: str | None
+    detail: dict[str, Any]
+    at: str
+
+
+class JobEventOut(BaseModel):
+    id: int
+    job_id: str
+    state: str
+    at: str
+
+
+class OperationsOut(BaseModel):
+    """Response shape of observability.snapshot; the dashboard and experiments read it."""
+
+    version: str
+    states: dict[str, int]
+    queue_depth: int
+    admitted_active: int
+    queue_limit: int
+    saturation: float
+    submitted: int
+    completed: int
+    failed: int
+    retries: int
+    throughput_60s: float
+    latency_window_seconds: int
+    duration: DurationOut
+    average_queue_wait: float
+    workers: list[WorkerOut]
+    worker_states: dict[str, int]
+    system_events: list[SystemEventOut]
+    job_events: list[JobEventOut]
 
 
 class Completion(Assignment):

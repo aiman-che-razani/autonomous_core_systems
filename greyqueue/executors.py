@@ -17,7 +17,12 @@ from greyqueue.tasks import RetryableTaskError, execute, message
 TASK_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "PYTHONPATH", "VIRTUAL_ENV", "LANG")
 # Removed from pool processes' environment. Threads share the worker's environment and
 # cannot be isolated; only the subprocess executor gets a fully minimal one.
+# This is protection against accidental reads (os.environ, a logged environment), not an
+# isolation boundary: /proc/<pid>/environ of the pool process still holds the values it was
+# spawned with. Use the subprocess executor for code that must not see them.
 SECRETS = ("WORKER_TOKEN", "CLIENT_TOKEN", "DATABASE_URL", "POSTGRES_PASSWORD", "APP_DB_PASSWORD")
+# Interpreter start-up and imports happen before the task's timeout clock starts.
+STARTUP_TIMEOUT = 60
 
 
 _rendezvous_barrier = None
@@ -45,14 +50,25 @@ def invoke(job: dict) -> dict:
 
 
 def parse_output(stdout: bytes) -> dict:
-    """A task process's stdout must be one JSON object with output or error."""
+    """A task process's stdout must be {"output": {...}} or {"error": str, "retryable": bool}.
+
+    Only those keys are passed on: anything else (e.g. a `worker_id` or `token`) could
+    otherwise override the ownership fields of the finish request.
+    """
+    invalid = {"error": "Task produced invalid output", "retryable": False}
     try:
         result = json.loads(stdout)
     except ValueError:
-        return {"error": "Task produced invalid output", "retryable": False}
-    if not isinstance(result, dict) or ("output" in result) == ("error" in result):
-        return {"error": "Task produced invalid output", "retryable": False}
-    return result
+        return invalid
+    if not isinstance(result, dict):
+        return invalid
+    if result.keys() == {"output"} and isinstance(result["output"], dict):
+        return {"output": result["output"]}
+    error, retryable = result.get("error"), result.get("retryable", False)
+    shaped = result.keys() <= {"error", "retryable"} and isinstance(retryable, bool)
+    if shaped and isinstance(error, str) and error:
+        return {"error": error, "retryable": retryable}
+    return invalid
 
 
 def bounded(result: dict) -> dict:
@@ -73,34 +89,51 @@ def bounded(result: dict) -> dict:
 class Executor:
     def __init__(self, strategy: str, capacity: int):
         self.strategy = strategy
+        self.capacity = capacity
         self.pool = None
+        self.replacing = asyncio.Lock()
         if strategy == "thread":
             self.pool = ThreadPoolExecutor(max_workers=capacity)
         elif strategy in {"process", "hybrid"}:
-            context = multiprocessing.get_context("spawn")
-            self.pool = ProcessPoolExecutor(
-                max_workers=capacity,
-                mp_context=context,
-                initializer=_bind_barrier,
-                initargs=(context.Barrier(capacity),),
-            )
-            # The pool spawns lazily inside submit(), on the event-loop thread. A job could
-            # then start on a warm process while the loop is still blocked spawning another,
-            # and its timeout clock would start late. Start every process up front: the
-            # warm-up tasks block on a shared barrier, so no process becomes idle (and gets
-            # reused) until all `capacity` processes exist.
-            for warm in [self.pool.submit(_rendezvous) for _ in range(capacity)]:
-                warm.result()
+            self.pool = self.process_pool()
+
+    def process_pool(self) -> ProcessPoolExecutor:
+        context = multiprocessing.get_context("spawn")
+        pool = ProcessPoolExecutor(
+            max_workers=self.capacity,
+            mp_context=context,
+            initializer=_bind_barrier,
+            initargs=(context.Barrier(self.capacity),),
+        )
+        # The pool spawns lazily inside submit(), on the event-loop thread. A job could then
+        # start on a warm process while the loop is still blocked spawning another, and its
+        # timeout clock would start late. Start every process up front: the warm-up tasks
+        # block on a shared barrier, so no process becomes idle (and gets reused) until all
+        # `capacity` processes exist.
+        for warm in [pool.submit(_rendezvous) for _ in range(self.capacity)]:
+            warm.result()
+        return pool
 
     async def run(self, job: dict) -> dict:
+        pool = self.pool
         try:
             return bounded(await self.dispatch(job))
         except BrokenProcessPool:
-            raise  # the pool is unusable for every later job; let the worker exit
+            # A task killed its pool process (crash, OOM, os._exit), which breaks every job
+            # in flight on that pool. Replace the pool and fail those jobs retryably: the
+            # retry budget bounds a job that keeps doing it, and the worker keeps running.
+            await self.replace(pool)
+            return {"error": "Task process died; the process pool was restarted", "retryable": True}
         except Exception as exc:  # noqa: BLE001 - deliberate: see comment
             # Anything else is this job's failure, not the worker's: report it so one bad
             # job cannot crash every worker that retries it.
             return {"error": f"Executor failed: {message(exc)}", "retryable": True}
+
+    async def replace(self, broken) -> None:
+        async with self.replacing:  # every job on the broken pool fails at once; replace once
+            if self.pool is broken:
+                broken.shutdown(wait=False, cancel_futures=True)
+                self.pool = await asyncio.to_thread(self.process_pool)
 
     async def dispatch(self, job: dict) -> dict:
         if self.strategy == "subprocess":
@@ -135,6 +168,12 @@ class Executor:
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         try:
+            # The child prints a line once Python and the task modules are loaded; start-up
+            # can take seconds on a loaded host and is not the task's time.
+            try:
+                await asyncio.wait_for(process.stdout.readline(), STARTUP_TIMEOUT)
+            except TimeoutError:
+                return {"error": "Task process did not start", "retryable": True}
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(json.dumps(job).encode()), job["timeout"]
             )

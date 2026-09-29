@@ -1,9 +1,16 @@
 name: checks
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
+# A newer push to the same ref supersedes the older run.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
   test:
+    # A branch of this repository is already tested by its push; its pull_request run would
+    # repeat the same commit. Pull requests from forks still run here.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30  # a hung Playwright or Compose step must not hold a runner for 6 h
     services:
@@ -36,7 +43,10 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run alembic upgrade head
       - run: uv run alembic check
-      - run: uv run pytest -q
+      # A missing TEST_DATABASE_URL would skip every database test and still pass, so any
+      # skip fails the job.
+      - run: uv run pytest -q -rs | tee pytest.log
+      - run: "! grep -Eq '^SKIPPED|[0-9]+ skipped' pytest.log"
       - run: uv run python -m scripts.experiments
       - run: uv run python -m scripts.side_effects
       - run: uv run python -m scripts.profile_reads
@@ -45,14 +55,15 @@ jobs:
       # Full Compose stack: migrate, least-privilege db-roles, coordinator, three workers.
       # configure.py writes .env (POSTGRES/APP_DB passwords); job-level env supplies tokens.
       - run: python scripts/configure.py
-      - run: docker compose -p greyqueue-ci up -d --build --scale worker=3 --wait --wait-timeout 180
+      - run: docker compose -p greyqueue-ci up -d --build --wait --wait-timeout 180
       - run: uv run python -m scripts.check_compose
       # The least-privilege role must read and write rows but nothing more (ADR 008).
       - run: bash scripts/check_roles.sh greyqueue-ci
       - if: always()
         run: docker compose -p greyqueue-ci logs --no-color > docs/results/compose-ci.log 2>&1 || true
       - if: always()
-        run: docker compose -p greyqueue-ci down -v
+        # Without .env (a failure before configure.py) interpolation fails and nothing is up.
+        run: "[ ! -f .env ] || docker compose -p greyqueue-ci down -v"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

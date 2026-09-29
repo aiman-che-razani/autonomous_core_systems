@@ -1,5 +1,5 @@
 "use strict";
-let token = "", timer = null, busyGen = -1, again = false, generation = 0, okGen = -1, depths = [];
+let token = "", timer = null, busyGen = -1, again = false, generation = 0, okGen = -1, inspectSeq = 0, depths = [];
 const el = id => document.getElementById(id);
 const TONE = {FAILED:"bad",DEAD_LETTER:"bad",DEAD:"bad",QUEUED:"wait",RETRY_WAIT:"wait",SUSPECT:"wait",CANCELLED:"muted",DRAINING:"muted"};
 const ACCENT = new Set(["LEASED", "RUNNING", "SUCCEEDED", "HEALTHY"]); // unknown states fall back to muted, never "healthy"
@@ -33,7 +33,7 @@ function resetPanels() {
  depths = []; chart();
  for (const id of ["workers", "jobs", "events"]) el(id).replaceChildren();
  for (const id of ["depth", "healthy", "throughput", "p95"]) el(id).textContent = "—";
- el("saturation").textContent = "Awaiting connection"; el("slots").textContent = "Capacity / active slots";
+ el("saturation").textContent = "Awaiting connection"; el("slots").textContent = "Busy / healthy slots";
  el("inspect").textContent = INSPECT_HINT; el("updated").textContent = ""; document.body.classList.remove("stale");
 }
 function setStatus(text) { if (el("connection").textContent !== text) el("connection").textContent = text; }
@@ -45,23 +45,30 @@ async function refresh() {
   const [data, jobs] = await Promise.all([api("/operations"), api("/jobs?limit=30&state=" + encodeURIComponent(state))]);
   if (current !== generation) return; // disconnected or reconnected while in flight
   if (state !== el("filter").value) { again = true; return; } // filter changed mid-flight: repaint with the new one
-  const focused = document.activeElement && document.activeElement.closest("tbody") ? document.activeElement.getAttribute("aria-label") : null; // rows are rebuilt below
-  if (document.body.classList.contains("stale")) notice(""); okGen = current;
+  const active = document.activeElement, inRows = active && active.closest("tbody"); // rows are rebuilt below
+  const focused = inRows ? active.getAttribute("aria-label") : null, region = inRows ? active.closest(".scroll") : null;
+  if (el("connection").textContent === "Connection unavailable") notice(""); okGen = current; // the error is over
   setStatus("Connected"); el("updated").textContent = new Date().toLocaleTimeString(); document.body.classList.remove("stale");
   el("depth").textContent = data.queue_depth; el("saturation").textContent = `${data.admitted_active} / ${data.queue_limit} admitted jobs`;
-  const healthy = data.workers.filter(w => w.state === "HEALTHY");
-  el("healthy").textContent = healthy.length; el("slots").textContent = `${data.workers.reduce((n, w) => n + w.running, 0)} active / ${healthy.reduce((n, w) => n + w.capacity, 0)} healthy slots`;
+  const healthy = data.workers.filter(w => w.state === "HEALTHY"); // slots: the newest 200 rows; the count: every worker
+  el("healthy").textContent = data.worker_states.HEALTHY || 0; el("slots").textContent = `${healthy.reduce((n, w) => n + w.running, 0)} busy / ${healthy.reduce((n, w) => n + w.capacity, 0)} healthy slots`;
   el("throughput").textContent = data.throughput_60s.toFixed(2); el("p95").textContent = data.duration.p95.toFixed(3);
   depths.push(data.queue_depth); if (depths.length > 60) depths.shift(); chart();
   el("workers").replaceChildren(); if (!data.workers.length) empty(el("workers"), 5, "No workers registered yet");
-  for (const w of data.workers) { const row = document.createElement("tr"); cell(row, w.id); badge(row, w.state); cell(row, `${w.running}/${w.capacity}`); cell(row, w.heartbeat_age_seconds.toFixed(1) + "s"); const td = cell(row, ""); if (["HEALTHY", "SUSPECT"].includes(w.state)) button(td, "Drain", `worker ${w.id}`, async live => { await api(`/workers/${encodeURIComponent(w.id)}/drain`, {method: "POST"}); if (live()) { notice("Worker will finish active jobs and stop claiming."); await refresh(); } }); el("workers").append(row); }
+  for (const w of data.workers) {
+   const row = document.createElement("tr"); cell(row, w.id); badge(row, w.state);
+   if (w.drain_requested && w.state !== "DRAINING") { const note = document.createElement("span"); note.className = "badge muted"; note.textContent = " · drain requested"; row.lastChild.append(note); } // SUSPECT/DEAD keep the intent (ADR 009)
+   cell(row, `${w.running}/${w.capacity}`); cell(row, w.heartbeat_age_seconds.toFixed(1) + "s"); const td = cell(row, "");
+   if (!w.drain_requested) button(td, "Drain", `worker ${w.id}`, async live => { const r = await api(`/workers/${encodeURIComponent(w.id)}/drain`, {method: "POST"}); if (live()) { notice(r.state === "DRAINING" ? "Worker will finish active jobs and stop claiming." : `Drain recorded; the worker is ${r.state} and will drain if the same process comes back.`); await refresh(); } });
+   el("workers").append(row);
+  }
   el("jobs").replaceChildren(); if (!jobs.length) empty(el("jobs"), 6, state ? `No ${state} jobs` : "No jobs yet");
-  for (const job of jobs) { const row = document.createElement("tr"), short = job.id.slice(0, 8); cell(row, short); cell(row, job.task); badge(row, job.status); cell(row, job.attempt_count); cell(row, job.priority); const td = cell(row, ""); button(td, "Inspect", `job ${short}`, async live => { const [now, attempts] = await Promise.all([api(`/jobs/${job.id}`), api(`/jobs/${job.id}/attempts`)]); if (live()) el("inspect").textContent = JSON.stringify({job: now, attempts}, null, 2); }); if (["QUEUED", "RETRY_WAIT"].includes(job.status)) button(td, "Cancel", `job ${short}`, async live => { await api(`/jobs/${job.id}`, {method: "DELETE"}); if (live()) { notice("Job cancelled."); await refresh(); } }); el("jobs").append(row); }
+  for (const job of jobs) { const row = document.createElement("tr"), short = job.id.slice(0, 8); cell(row, short); cell(row, job.task); badge(row, job.status); cell(row, job.attempt_count); cell(row, job.priority); const td = cell(row, ""); button(td, "Inspect", `job ${short}`, async live => { const n = ++inspectSeq; const [now, attempts] = await Promise.all([api(`/jobs/${job.id}`), api(`/jobs/${job.id}/attempts`)]); if (live() && n === inspectSeq /* only the latest click paints */) el("inspect").textContent = JSON.stringify({job: now, attempts}, null, 2); }); if (["QUEUED", "RETRY_WAIT"].includes(job.status)) button(td, "Cancel", `job ${short}`, async live => { await api(`/jobs/${job.id}`, {method: "DELETE"}); if (live()) { notice("Job cancelled."); await refresh(); } }); el("jobs").append(row); }
   el("events").replaceChildren();
   const events = [...data.system_events.map(e => ({at: e.at, text: [e.kind, e.worker_id].filter(Boolean).join(" · ")})), ...data.job_events.map(e => ({at: e.at, text: e.state + " · " + e.job_id.slice(0, 8)}))].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 30);
   if (!events.length) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "No events yet"; el("events").append(li); }
   for (const e of events) { const li = document.createElement("li"); li.textContent = new Date(e.at).toLocaleTimeString() + "  " + e.text; el("events").append(li); }
-  if (focused) { const same = [...document.querySelectorAll("tbody button")].find(b => b.getAttribute("aria-label") === focused); if (same) same.focus(); } // keep keyboard focus across the repaint
+  if (focused) { const same = [...document.querySelectorAll("tbody button")].find(b => b.getAttribute("aria-label") === focused); (same || region)?.focus(); } // keep keyboard focus across the repaint; the table region if the button is gone
  } catch (error) {
   if (current !== generation) return;
   if (error.status === 401) { disconnect("The token was rejected. Connect again with a valid CLIENT_TOKEN."); return; }
@@ -69,7 +76,7 @@ async function refresh() {
   notice(error.message + (painted ? " · Showing the last successful refresh." : ""));
  } finally { if (busyGen === current) busyGen = -1; if (again && current === generation) { again = false; refresh(); } }
 }
-el("connect").onsubmit = async event => { event.preventDefault(); token = el("token").value; el("token").value = ""; generation++; clearInterval(timer); resetPanels(); notice(""); setStatus("Connecting…"); el("disconnect").disabled = false; await refresh(); timer = setInterval(refresh, 2000); };
+el("connect").onsubmit = async event => { event.preventDefault(); token = el("token").value; el("token").value = ""; generation++; clearInterval(timer); resetPanels(); notice(""); setStatus("Connecting…"); el("disconnect").disabled = false; const g = generation; await refresh(); if (g === generation) timer = setInterval(refresh, 2000); }; // a second Connect during a slow first refresh must not leave two intervals
 el("disconnect").onclick = () => disconnect("Disconnected. Displayed results were cleared.");
 el("task").onchange = () => { el("args").value = JSON.stringify({calculate_pi: {iterations: 100000}, sleep: {seconds: 2}, hash_text: {text: "Hello GreyQueue"}, flaky: {failures: 2}}[el("task").value]); };
 el("filter").onchange = refresh;

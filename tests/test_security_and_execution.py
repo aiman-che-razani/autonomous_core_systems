@@ -7,17 +7,20 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import select, text
+from sqlalchemy.dialects import postgresql
 
 from greyqueue import service
 from greyqueue.api import create_app, unprocessable
 from greyqueue.config import Settings
 from greyqueue.db import make_sessions
 from greyqueue.executors import TASK_ENV, Executor, bounded
-from greyqueue.models import SystemEvent, Worker
+from greyqueue.models import Job, SystemEvent, Worker
 from greyqueue.observability import prometheus
-from greyqueue.protocol import Completion, Submit
+from greyqueue.protocol import Completion, Registration, Submit
 from greyqueue.recovery import recover_jobs
+from greyqueue.sql import statuses
 from greyqueue.tasks import RetryableTaskError, message
 
 
@@ -73,6 +76,7 @@ def test_results_the_coordinator_would_reject_become_permanent_failures():
     assert bounded({"output": {"x": float("nan")}})["retryable"] is False
     assert bounded({"output": {"x": "\x00"}})["retryable"] is False
     assert bounded({"output": {"ok": True}}) == {"output": {"ok": True}}
+    assert bounded({"output": {"x": {1}}})["retryable"] is False  # not JSON-serialisable
     assert message(RetryableTaskError()) == "RetryableTaskError"
     assert "WORKER_TOKEN" not in TASK_ENV and "CLIENT_TOKEN" not in TASK_ENV
 
@@ -139,7 +143,9 @@ def test_dead_worker_id_can_reregister_and_recovery_is_recorded(database):
         client.post("/internal/workers/heartbeat", headers=heartbeat, json={"worker_id": "fixed"})
         with sessions.begin() as db:
             db.get(Worker, "fixed").state = "DEAD"
-        assert client.post("/workers/fixed/drain", headers=client_auth).status_code == 409
+        # Draining a DEAD worker records the intent without reviving it (ADR 009) ...
+        drained = client.post("/workers/fixed/drain", headers=client_auth)
+        assert drained.status_code == 200 and drained.json()["state"] == "DEAD"
         # A restarted process with a fixed WORKER_ID brings a new session credential.
         restart = {**register, "session_token": "c" * 40}
         assert (
@@ -368,7 +374,15 @@ def test_session_check_waits_for_a_concurrent_takeover(database):
             row.session_hash = hashlib.sha256(("c" * 40).encode()).hexdigest()
             db.flush()
             pending = pool.submit(client.post, "/internal/claim", headers=old, json=claim)
-            time.sleep(0.5)
+            # Wait until the claim's transaction is actually blocked on a lock, so the check
+            # below cannot pass just because the request has not reached the database yet.
+            waiting = "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+            deadline = time.monotonic() + 10
+            with sessions() as observer:
+                while not observer.scalar(text(waiting)) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                    observer.rollback()  # a fresh snapshot of pg_stat_activity
+                assert observer.scalar(text(waiting))
             assert not pending.done()  # waiting for the lock, not answered from a stale read
         assert pending.result(timeout=10).status_code == 401
 
@@ -383,7 +397,20 @@ def test_openapi_documents_security_errors_and_models():
     }
     submit = schema["paths"]["/jobs"]["post"]
     assert {"200", "201", "401", "409", "422", "429", "503"} <= set(submit["responses"])
+    assert "404" not in submit["responses"]  # a missing dependency is a 422
+    assert "Retry-After" in submit["responses"]["429"]["headers"]
     assert "$ref" in str(submit["responses"]["200"]["content"])
+    # Errors are documented per route, not app-wide.
+    health = schema["paths"]["/health"]["get"]["responses"]
+    assert "401" not in health and "422" not in health and "$ref" in str(health["200"])
+    assert "429" not in schema["paths"]["/internal/claim"]["post"]["responses"]
+    operations = schema["paths"]["/operations"]["get"]["responses"]
+    assert "OperationsOut" in str(operations["200"]) and "422" not in operations
+    metrics = schema["paths"]["/metrics"]["get"]["responses"]
+    assert "application/json" in metrics["401"]["content"]
+    assert "text/plain" in metrics["200"]["content"]
+    assert "text/plain" in submit["responses"]["400"]["content"]  # bad Host is not JSON
+    assert {"408", "413", "426"} <= set(submit["responses"])
     assert submit["security"] == [{"clientToken": []}]
     assert "security" not in schema["paths"]["/health"]["get"]
     claim = schema["paths"]["/internal/claim"]["post"]
@@ -398,8 +425,6 @@ def test_openapi_documents_security_errors_and_models():
 
 
 def test_unprocessable_shapes():
-    from pydantic import BaseModel, ValidationError
-
     assert unprocessable(service.Invalid("x", "depends_on")) == [
         {"type": "value_error", "loc": ["body", "depends_on"], "msg": "x"}
     ]
@@ -411,7 +436,39 @@ def test_unprocessable_shapes():
     with pytest.raises(ValidationError) as failure:
         Args(seconds="no")
     assert unprocessable(failure.value)[0]["loc"] == ["body", "args", "seconds"]
-    assert bounded({"output": {"x": {1}}})["retryable"] is False
+
+
+def test_nan_and_invalid_text_are_422_not_500():
+    app = create_app(settings_for("postgresql+psycopg://user:pass@127.0.0.1:1/none"))
+    auth = {"Authorization": "Bearer client-test-token-123", "Content-Type": "application/json"}
+    with TestClient(app, raise_server_exceptions=False) as client:
+        # json.loads accepts NaN/Infinity; echoing them back in the 422 used to raise.
+        for body in (
+            b'{"task":"sleep","args":{"seconds":NaN}}',
+            b'{"task":"sleep","args":{"seconds":1},"priority":NaN}',
+            b'{"task":"sleep","args":{"seconds":1},"metadata":{"x":Infinity}}',
+        ):
+            response = client.post("/jobs", content=body, headers=auth)
+            assert response.status_code == 422, (body, response.text)
+            assert all(set(d) == {"type", "loc", "msg"} for d in response.json()["detail"])
+    # Lone surrogates parse as JSON but psycopg cannot encode them (it raised a 500).
+    with pytest.raises(ValidationError):
+        Registration(worker_id="w", session_token="\ud800" + "a" * 40)
+    with pytest.raises(ValidationError):
+        Completion(worker_id="w", token=uuid4(), error="\ud800")
+    with pytest.raises(ValidationError):
+        Submit(task="sleep", args={"seconds": 1}, metadata={"x": "\udfff"})
+
+
+def test_status_filters_render_as_sql_literals():
+    # Generic plans can only use the partial indexes when the IN-list is literal SQL.
+    query = select(Job.id).where(Job.status.in_(statuses(["RETRY_WAIT", "QUEUED"])))
+    sql = str(
+        query.compile(
+            dialect=postgresql.psycopg.dialect(), compile_kwargs={"render_postcompile": True}
+        )
+    )
+    assert "IN ('QUEUED', 'RETRY_WAIT')" in sql
 
 
 def test_url_options_override_default_timeouts():

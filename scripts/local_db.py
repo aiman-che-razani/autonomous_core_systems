@@ -35,7 +35,9 @@ def main():
             )
         password = secrets.token_urlsafe(32)
         password_file = RUNTIME / "init-password"
-        password_file.write_text(password, encoding="utf-8")
+        descriptor = os.open(password_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as secret:
+            secret.write(password)
         try:
             run(
                 "initdb",
@@ -51,13 +53,15 @@ def main():
             )
         finally:
             password_file.unlink(missing_ok=True)
-        (ROOT / ".env").write_text(
-            f"DATABASE_URL=postgresql+psycopg://greyqueue:{password}@127.0.0.1:55441/postgres\n"
-            f"POSTGRES_PASSWORD={password}\nCLIENT_TOKEN={secrets.token_urlsafe(32)}\n"
-            f"WORKER_TOKEN={secrets.token_urlsafe(32)}\n"
-            "COORDINATOR_URL=http://127.0.0.1:8810\n",
-            encoding="utf-8",
-        )
+        # Created owner-only (0600) from the start, like scripts/configure.py.
+        descriptor = os.open(ROOT / ".env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as env:
+            env.write(
+                f"DATABASE_URL=postgresql+psycopg://greyqueue:{password}@127.0.0.1:55441/postgres\n"
+                f"POSTGRES_PASSWORD={password}\nCLIENT_TOKEN={secrets.token_urlsafe(32)}\n"
+                f"WORKER_TOKEN={secrets.token_urlsafe(32)}\n"
+                "COORDINATOR_URL=http://127.0.0.1:8810\n"
+            )
     run(
         "pg_ctl",
         "-D",

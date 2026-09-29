@@ -6,7 +6,9 @@ ambiguous timeout creates a second job; pass a stable key when retrying.
 
 import argparse
 import json
+import sys
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -73,7 +75,7 @@ def main():
         elif args.command == "cancel":
             response = client.delete(f"/jobs/{args.id}")
         elif args.command == "drain":
-            response = client.post(f"/workers/{args.id}/drain")
+            response = client.post(f"/workers/{quote(args.id, safe='')}/drain")
         elif args.command == "attempts":
             response = client.get(f"/jobs/{args.id}/attempts")
         elif args.command == "jobs":
@@ -87,6 +89,8 @@ def main():
             )
         if response.is_error:
             parser.exit(1, f"HTTP {response.status_code}: {response.text}\n")
+        if args.command == "submit" and response.status_code == 200:  # 201 is a new job
+            print("Idempotent replay: this key already admitted the job below.", file=sys.stderr)
         print(json.dumps(response.json(), indent=2))
 
 

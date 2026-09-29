@@ -43,9 +43,12 @@ GRANT SELECT, INSERT, UPDATE ON jobs, attempts, workers TO greyqueue_app;
 GRANT SELECT, INSERT ON results, events, system_events TO greyqueue_app;
 GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO greyqueue_app;
 
--- Tables created by future migrations (run as the owner) get read/append/update; narrow
--- them here if they are append-only.
+-- The REVOKE above resets every table to the two explicit lists on each `up`, so a table
+-- added by a new migration gets NO privileges until it is added to one of the GRANT lines.
+-- That is deliberate: each table's access is decided here, not inherited, and
+-- scripts/check_roles.sh fails on a table without one. Older volumes had a default table
+-- grant (which this REVOKE voided anyway); drop it.
 ALTER DEFAULT PRIVILEGES FOR ROLE greyqueue IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE ON TABLES TO greyqueue_app;
+    REVOKE ALL ON TABLES FROM greyqueue_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE greyqueue IN SCHEMA public
     GRANT USAGE ON SEQUENCES TO greyqueue_app;

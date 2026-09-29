@@ -30,8 +30,14 @@ class Worker(Base):
         CheckConstraint(
             "state IN ('HEALTHY','SUSPECT','DEAD','DRAINING')", name="workers_state_check"
         ),
-        # detect_workers filters and worker_rows sorts on last_seen; DEAD rows accumulate.
+        # worker_rows sorts every worker by last_seen.
         Index("ix_workers_last_seen", "last_seen"),
+        # detect_workers scans live workers only; DEAD rows accumulate with old last_seen.
+        Index(
+            "ix_workers_live_last_seen",
+            "last_seen",
+            postgresql_where=text("state IN ('DRAINING','HEALTHY','SUSPECT')"),
+        ),
     )
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     state: Mapped[str] = mapped_column(String(24), server_default="HEALTHY")
@@ -153,6 +159,10 @@ class Result(Base):
 
 class Event(Base):
     __tablename__ = "events"
+    # /metrics counts retries; every other total comes from jobs.status.
+    __table_args__ = (
+        Index("ix_events_retries", "id", postgresql_where=text("state = 'RETRY_WAIT'")),
+    )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id"), index=True)
     state: Mapped[str] = mapped_column(String(24))

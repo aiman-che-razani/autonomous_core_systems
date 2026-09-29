@@ -82,7 +82,8 @@ async def run(
 
         async def finish(prefix, ownership, result, job_id):
             try:
-                await post(client, prefix + "/finish", {**ownership, **result})
+                # Ownership last: nothing in a task's result may replace worker_id or token.
+                await post(client, prefix + "/finish", {**result, **ownership})
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code not in REJECTED:
                     raise
@@ -94,7 +95,7 @@ async def run(
                     "error": f"Coordinator rejected the result (HTTP {status})",
                     "retryable": False,
                 }
-                await post(client, prefix + "/finish", {**ownership, **result})
+                await post(client, prefix + "/finish", {**result, **ownership})
             return result
 
         async def consume(slot):

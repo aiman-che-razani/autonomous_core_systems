@@ -197,6 +197,8 @@ def claim(
         )
     )
     if attempt:
+        # The API always sends a claim_id (protocol.Claim), so over HTTP an occupied slot is
+        # only ever a 409; returning the attempt is for direct callers without one (tests).
         if claim_id and attempt.claim_id != claim_id:
             raise Conflict("Slot is occupied")
         return get_job(session, attempt.job_id), attempt
