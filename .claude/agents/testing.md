@@ -43,7 +43,7 @@ Find the cause; don't lengthen sleeps. Reference: the process-pool timeout test 
 ## "Tests pass" vs "verified"
 - **Not covered by pytest:** real multi-process crash recovery, the database outage, the Compose stack and its role grants, the browser dashboard, benchmarks. These run via `scripts/*` and `benchmarks/run.py`. `check_dashboard --dry-run` runs every browser check without writing evidence.
 - **CI** (`.github/workflows/ci.yml:25-60`) runs lint, migrations, pytest *with* the database, experiments **without** `--database-outage`, side_effects, profile_reads, `check_dashboard`, `configure.py`, the Compose stack, `check_compose` and `check_roles.sh`. It uploads `docs/results/` as an artifact, **not a commit**. CI never runs the outage experiment or the benchmarks, and runs on Linux only (Windows behaviour is local-only).
-- **Evidence currency.** Committed `docs/results/*.json` can be older than the code; after the audit rounds only `compose.json` is current. Compare `git log -1 -- docs/results/<file>` with the last change to the code it measures. `prd` decides what may be claimed; you say what is actually current.
+- **Evidence currency.** Committed `docs/results/*.json` can be older than the code; after the audit rounds everything was regenerated on 2026-09-29 except `benchmark-100-matrix.*` and `benchmark-1000-hybrid-mixed.*`, which are still v1.0. Compare `git log -1 -- docs/results/<file>` with the last change to the code it measures. `prd` decides what may be claimed; you say what is actually current.
 
 ## Output
 - **For a run:** passed/failed/**skipped** counts, whether the DB was available, and any warnings.

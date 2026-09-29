@@ -10,12 +10,12 @@ The read-path optimization batches result lookup for a page. `python -m scripts.
 
 ## Recorded local results
 
-Recorded at the v1.0 release, before the audit changes to queue indexes and metric windows; re-run to measure the current code.
+The 10,000-job run and the read-path profile were re-recorded on 2026-09-29, after both audit rounds. The 100-job matrix and the 1,000-job mixed run are still the v1.0 recordings (2026-09-16).
 
 - 100-job matrix: all 12 strategy/workload cases completed without execution failures or retries.
-- 1,000 mixed jobs, hybrid, 3 workers x 2 slots: 44.29 jobs/s; P95 end-to-end latency 7.714 seconds.
-- 10,000 light jobs, hybrid, 3 workers x 2 slots: 44.99 jobs/s; P95 38.165 seconds; peak queue depth 2,041; zero execution/submission retries and failures.
+- 1,000 mixed jobs, hybrid, 3 workers x 2 slots (v1.0): 44.29 jobs/s; P95 end-to-end latency 7.714 seconds.
+- 10,000 light jobs, hybrid, 3 workers x 2 slots (current code): 38.15 jobs/s; P50 25.49 s, P95 41.064 seconds; peak queue depth 1,878; zero execution/submission retries and failures. The v1.0 run of the same workload recorded 44.99 jobs/s, P50 30.68 s, P95 38.165 s and peak 2,041. With one run each, the 15% lower throughput is not established as a regression or as noise; average execution rose from 43 ms to 51 ms, and every worker request now waits for its worker-row lock (the session check added to close a takeover race), which is a plausible contributor. Repeated runs of both commits would be needed to separate the two.
 - Hardware: Windows 11, 8 physical / 16 logical CPUs, 31.31 GiB RAM; full CPU identifier and timestamps are in each JSON artifact.
-- 100-result page: 101 SQL statements reduced to 2 with identical output. The recorded local timings were about 36.4 ms and 4.8 ms; query count is the stronger reproducible result.
+- 100-result page: 101 SQL statements reduced to 2 with identical output. The latest local timings were about 46.6 ms and 5.8 ms (v1.0: 36.4 ms and 4.8 ms); query count is the stronger reproducible result.
 
 These figures describe different workloads and queue depths. The larger run's higher latency reflects waiting behind queued work; it does not imply a slower individual hash task.

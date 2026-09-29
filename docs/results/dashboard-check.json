@@ -6,8 +6,12 @@
     "submit",
     "live completion",
     "inspect attempts",
+    "focus kept across refresh",
+    "complete state filter",
+    "empty state",
     "no persisted token",
     "mobile overflow",
-    "disconnect"
+    "disconnect clears panels",
+    "rejected token disconnects"
   ]
 }
